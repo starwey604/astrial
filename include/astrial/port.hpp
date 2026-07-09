@@ -7,6 +7,12 @@
 #include <filesystem>
 #include <fstream>
 namespace fs = std::filesystem;
+#elif defined(_WIN32)
+#include <windows.h>
+#include <setupapi.h>
+#include <initguid.h>
+#include <devpkey.h>
+#pragma comment(lib, "setupapi.lib")
 #endif
 
 namespace detail

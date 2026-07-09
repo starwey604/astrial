@@ -10,7 +10,7 @@ int main()
        .buad_rate(115200)
        .parity(Parity::None)
        .stop_bits(StopBits::One)
-       .open("/dev/ttyACM0")
+       .open("COM6")
        .or_else([](auto&& e)
         {
             throw std::runtime_error(e.message());

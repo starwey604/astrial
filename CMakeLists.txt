@@ -27,6 +27,10 @@ endif ()
 
 target_link_libraries(astrial PUBLIC tl-expected PRIVATE asio_standalone)
 
+if (WIN32)
+    target_link_libraries(astrial PRIVATE setupapi cfgmgr32)
+endif ()
+
 target_compile_definitions(astrial PUBLIC ASTRIAL_BUFFER_LENGTH=${ASTRIAL_BUFFER_SIZE})
 
 add_subdirectory(examples)
