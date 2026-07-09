@@ -70,8 +70,20 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     impl.m_port.open(std::string(name), ec);
     if (ec) return tl::make_unexpected(ec);
 
+    // performance optimization
+
 #ifdef _WIN32
     ::SetupComm(impl.m_port.native_handle(), 65536, 65536);
+#elifdef __linux__
+#include <sys/ioctl.h>
+#include <linux/serial.h>
+    int fd = impl.m_port.native_handle();
+    serial_struct serial_opts{};
+    if (::ioctl(fd, TIOCGSERIAL, &serial_opts) == 0)
+    {
+        serial_opts.flags |= ASYNC_LOW_LATENCY;
+        ::ioctl(fd, TIOCSSERIAL, &serial_opts);
+    }
 #endif
 
     // try set baud rate
