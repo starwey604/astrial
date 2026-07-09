@@ -13,8 +13,9 @@ public:
     std::jthread m_thread;
     std::array<uint8_t, ASTRIAL_BUFFER_LENGTH> m_rx_buffer{};
     std::function<void(std::span<const uint8_t>)> m_callback;
+    bool m_read_started = false;
 
-    Impl() : m_ctx(), m_port(m_ctx)
+    Impl() : m_port(m_ctx)
     {
     };
 
@@ -30,6 +31,27 @@ public:
         m_work_guard.reset();
         m_ctx.stop();
         if (m_thread.joinable()) m_thread.join();
+    }
+
+    void start_read()
+    {
+        if (m_read_started) return;
+        m_read_started = true;
+
+        struct Reader
+        {
+            Impl& impl_ref;
+
+            void operator()(const asio::error_code& ec, std::size_t bytes)
+            {
+                if (!ec && bytes > 0)
+                {
+                    impl_ref.m_callback(std::span<const uint8_t>(impl_ref.m_rx_buffer.data(), bytes));
+                }
+                impl_ref.m_port.async_read_some(asio::buffer(impl_ref.m_rx_buffer), *this);
+            }
+        };
+        m_port.async_read_some(asio::buffer(m_rx_buffer), Reader{*this});
     }
 };
 
@@ -53,8 +75,11 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     switch (m_parity)
     {
     case Parity::Even: asio_parity = asio::serial_port_base::parity::even;
-    case Parity::Odd: asio_parity = asio::serial_port_base::parity::even;
+        break;
+    case Parity::Odd: asio_parity = asio::serial_port_base::parity::odd;
+        break;
     default: asio_parity = asio::serial_port_base::parity::none;
+        break;
     }
 
     impl.m_port.set_option(asio::serial_port_base::parity(asio_parity), ec);
@@ -68,26 +93,6 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     {
         impl.m_ctx.run();
     });
-
-    // start async read
-    auto start_read = [&impl]
-    {
-        struct Reader
-        {
-            Serial::Impl& impl_ref;
-
-            void operator()(const asio::error_code& ec, std::size_t bytes)
-            {
-                if (!ec && bytes > 0)
-                {
-                    impl_ref.m_callback(std::span<const uint8_t>(impl_ref.m_rx_buffer.data(), bytes));
-                }
-                impl_ref.m_port.async_read_some(asio::buffer(impl_ref.m_rx_buffer), *this);
-            }
-        };
-        impl.m_port.async_read_some(asio::buffer(impl.m_rx_buffer), Reader{impl});
-    };
-    start_read();
 
     return std::move(serial);
 }
@@ -110,7 +115,10 @@ Serial& Serial::operator=(Serial&&) noexcept = default;
 void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 {
     if (callback)
+    {
         m_impl->m_callback = std::move(callback);
+        m_impl->start_read();
+    }
 }
 
 tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t> data)

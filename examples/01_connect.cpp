@@ -26,13 +26,17 @@ int main()
         }
     );
 
-    static constexpr std::array<uint8_t, 3> cmd{0xA5, 0x5A, 0x01};
-    
-    if (auto res = serial.write(cmd); !res)
+    static constexpr std::array<uint8_t, 7> cmd{0x61, 0x73, 0x74, 0x72, 0x69, 0x61, 0x6C};
+
+    for (auto i = 0; i < 3; ++i)
     {
-        throw std::runtime_error(res.error().message());
+        if (auto res = serial.write(cmd); !res)
+        {
+            throw std::runtime_error(res.error().message());
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+
     return 0;
 }
