@@ -1,1 +1,1 @@
-#include <astrial/astrial.hpp>
+#include <astrial.hpp>

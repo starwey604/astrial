@@ -1,6 +1,0 @@
-#ifndef ASTRIAL_ASTRIAL_HPP
-#define ASTRIAL_ASTRIAL_HPP
-
-
-
-#endif //ASTRIAL_ASTRIAL_HPP
