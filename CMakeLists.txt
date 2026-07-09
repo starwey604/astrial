@@ -15,7 +15,7 @@ add_library(astrial
         src/astrial/ports.cpp
 )
 
-set(ASTRIAL_BUFFER_SIZE "2048" CACHE STRING "The default size of astrial serial backend buffer")
+set(ASTRIAL_BUFFER_SIZE "4096" CACHE STRING "The default size of astrial serial backend buffer")
 
 target_include_directories(astrial PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
