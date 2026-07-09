@@ -34,8 +34,8 @@ namespace detail
             return tl::make_unexpected(SerialError::ValueOutOfRange);
         }
     }
-}
 #endif
+}
 
 std::vector<SerialPortInfo> Serial::list_ports()
 {

@@ -16,7 +16,7 @@ namespace detail
     static std::string read_sys_file(const fs::path& path);
     // 解析 16 进制字符串（如 "1a86" -> 0x1A86）
     static tl::expected<uint16_t, SerialError> parse_hex(const std::string& str);
-}
 #endif
+}
 
 #endif //ASTRIAL_PORT_HPP

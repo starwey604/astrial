@@ -1,6 +1,7 @@
 #include <astrial.hpp>
 #include <iostream>
 #include <thread>
+#include <array>
 
 int main()
 {

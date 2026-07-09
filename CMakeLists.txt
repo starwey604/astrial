@@ -21,7 +21,11 @@ target_include_directories(astrial PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 target_compile_features(astrial PUBLIC cxx_std_20)
 
-target_link_libraries(astrial PRIVATE asio_standalone tl-expected)
+if (WIN32)
+    target_compile_options(astrial PRIVATE /utf-8)
+endif ()
+
+target_link_libraries(astrial PUBLIC tl-expected PRIVATE asio_standalone)
 
 target_compile_definitions(astrial PUBLIC ASTRIAL_BUFFER_LENGTH=${ASTRIAL_BUFFER_SIZE})
 
