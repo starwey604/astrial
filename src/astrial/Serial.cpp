@@ -4,6 +4,10 @@
 #include <asio.hpp>
 #include <thread>
 
+#ifdef _WIN32
+#include <winbase.h>
+#endif
+
 class Serial::Impl
 {
 public:
@@ -15,7 +19,7 @@ public:
     std::function<void(std::span<const uint8_t>)> m_callback;
     bool m_read_started = false;
 
-    Impl() : m_port(m_ctx)
+    Impl() : m_ctx(1), m_port(m_ctx)
     {
     };
 
@@ -66,6 +70,10 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     impl.m_port.open(std::string(name), ec);
     if (ec) return tl::make_unexpected(ec);
 
+#ifdef _WIN32
+    ::SetupComm(impl.m_port.native_handle(), 65536, 65536);
+#endif
+
     // try set baud rate
     impl.m_port.set_option(asio::serial_port_base::baud_rate(m_rate), ec);
     if (ec) return tl::make_unexpected(ec);
@@ -91,6 +99,9 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     );
     impl.m_thread = std::jthread([&impl]
     {
+#ifdef _WIN32
+        ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
         impl.m_ctx.run();
     });
 
