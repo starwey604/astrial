@@ -1,2 +1,5 @@
-add_executable(01_basic 01_basic.cpp)
-target_link_libraries(01_basic PRIVATE astrial)
+add_executable(01_connect 01_connect.cpp)
+target_link_libraries(01_connect PRIVATE astrial)
+
+add_executable(01_list_ports 01_list_ports.cpp)
+target_link_libraries(01_list_ports PRIVATE astrial)

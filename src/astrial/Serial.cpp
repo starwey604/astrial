@@ -92,10 +92,16 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     return std::move(serial);
 }
 
+tl::expected<Serial, std::error_code> SerialBuilder::open(const SerialPortInfo& info) const
+{
+    return open(info.port_name);
+}
+
 SerialBuilder Serial::builder()
 {
     return SerialBuilder{};
 }
+
 
 Serial::~Serial() = default;
 Serial::Serial(Serial&&) noexcept = default;

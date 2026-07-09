@@ -19,6 +19,7 @@ public:
     SerialBuilder& stop_bits(StopBits stop_bits);
 
     tl::expected<Serial, std::error_code> open(std::string_view name) const;
+    tl::expected<Serial, std::error_code> open(const SerialPortInfo& info) const;
 
 private:
     uint32_t m_rate{};

@@ -14,6 +14,7 @@ public:
     friend class SerialBuilder;
 
     static SerialBuilder builder();
+    static std::vector<SerialPortInfo> list_ports();
 
     ~Serial();
 
