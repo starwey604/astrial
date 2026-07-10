@@ -74,7 +74,7 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
 
 #ifdef _WIN32
     ::SetupComm(impl.m_port.native_handle(), 65536, 65536);
-#elifdef __linux__
+#elif  defined(__linux__)
 #include <sys/ioctl.h>
 #include <linux/serial.h>
     int fd = impl.m_port.native_handle();
