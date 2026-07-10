@@ -4,6 +4,9 @@ project(astrial)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+option(BUILD_EXAMPLE "Build example" ON)
 
 add_subdirectory(3rdparty)
 
@@ -37,4 +40,6 @@ endif ()
 
 target_compile_definitions(astrial PUBLIC ASTRIAL_BUFFER_LENGTH=${ASTRIAL_BUFFER_SIZE})
 
-add_subdirectory(examples)
+if (BUILD_EXAMPLE)
+    add_subdirectory(examples)
+endif ()
