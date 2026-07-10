@@ -9,6 +9,8 @@ enum class Parity { None, Odd, Even };
 
 enum class StopBits { One, OnePointFive, Two };
 
+enum class DataBits { Five = 5, Six = 6, Seven = 7, Eight = 8 };
+
 struct SerialPortInfo
 {
     std::string port_name;

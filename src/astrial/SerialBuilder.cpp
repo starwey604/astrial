@@ -20,3 +20,9 @@ SerialBuilder& SerialBuilder::stop_bits(const StopBits stop_bits)
     m_stop_bits = stop_bits;
     return *this;
 }
+
+SerialBuilder& SerialBuilder::data_bits(const DataBits data_bits)
+{
+    m_data_bits = data_bits;
+    return *this;
+}

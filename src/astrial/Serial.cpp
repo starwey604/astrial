@@ -105,6 +105,24 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     impl.m_port.set_option(asio::serial_port_base::parity(asio_parity), ec);
     if (ec) return tl::make_unexpected(ec);
 
+    // stop bits
+    asio::serial_port_base::stop_bits::type asio_stop;
+    switch (m_stop_bits)
+    {
+    case StopBits::OnePointFive: asio_stop = asio::serial_port_base::stop_bits::onepointfive;
+        break;
+    case StopBits::Two: asio_stop = asio::serial_port_base::stop_bits::two;
+        break;
+    default: asio_stop = asio::serial_port_base::stop_bits::one;
+        break;
+    }
+    impl.m_port.set_option(asio::serial_port_base::stop_bits(asio_stop), ec);
+    if (ec) return tl::make_unexpected(ec);
+
+    // data bits
+    impl.m_port.set_option(asio::serial_port_base::character_size(static_cast<unsigned int>(m_data_bits)), ec);
+    if (ec) return tl::make_unexpected(ec);
+
     // background thread setup
     impl.m_work_guard = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
         impl.m_ctx.get_executor()
