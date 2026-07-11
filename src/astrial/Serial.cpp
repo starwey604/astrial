@@ -176,12 +176,19 @@ public:
 
     void enqueue_write(const std::span<const uint8_t> data, WriteCallback callback)
     {
-        asio::post(m_ctx, [this, data, cb = std::move(callback)]() mutable
+        const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
+        std::pmr::vector temp_buf(data.begin(), data.end(), alloc);
+
+        const bool was_empty = m_write_queue.peek() == nullptr;
+        m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(callback)});
+
+        if (was_empty)
         {
-            const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
-            std::pmr::vector temp_buf(data.begin(), data.end(), alloc);
-            m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(cb)});
-        });
+            asio::post(m_ctx, [this]
+            {
+                start_write_loop();
+            });
+        }
     }
 
     void start_write_loop()
