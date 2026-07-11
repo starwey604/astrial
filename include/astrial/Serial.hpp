@@ -25,6 +25,9 @@ public:
 
     void on_data(std::function<void(std::span<const uint8_t>)> callback);
     tl::expected<void, std::error_code> write(std::span<const uint8_t> data);
+
+    using WriteCallback = std::function<void(const std::error_code&, std::size_t)>;
+    void async_write(std::span<const uint8_t> data, WriteCallback callback);
     void close();
 
     void on_disconnect(std::function<void(const std::error_code&)> callback);

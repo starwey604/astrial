@@ -3,7 +3,9 @@
 #include <astrial/detail.hpp>
 
 #include <asio.hpp>
+#include <queue>
 #include <thread>
+#include <semaphore>
 
 class Serial::Impl
 {
@@ -21,6 +23,14 @@ public:
 
     std::jthread m_thread;
     std::array<uint8_t, ASTRIAL_BUFFER_LENGTH> m_rx_buffer{};
+
+    struct WriteRequest
+    {
+        std::vector<uint8_t> buffer;
+        WriteCallback callback;
+    };
+
+    std::queue<WriteRequest> m_write_queue;
 
     std::function<void(std::span<const uint8_t>)> m_data_callback;
     std::function<void(const asio::error_code& code)> m_disconnect_callback;
@@ -58,6 +68,26 @@ public:
 
     void handle_disconnection(const std::error_code& ec)
     {
+        // filter error
+        if (ec == asio::error::operation_aborted)
+        {
+            return;
+        }
+
+#if defined(_WIN32)
+        if (ec.value() == ERROR_DEVICE_REMOVED ||
+            ec.value() == ERROR_ACCESS_DENIED ||
+            ec.value() == ERROR_GEN_FAILURE)
+        {
+            return;
+        }
+#else
+        if (ec.value() == ENODEV || ec.value() == EIO || ec.value() == ENXIO)
+        {
+            return;
+        }
+#endif
+
         // shutdown port first
         asio::error_code close_ec;
         m_port.close(close_ec);
@@ -138,6 +168,49 @@ public:
         };
         m_port.async_read_some(asio::buffer(m_rx_buffer), Reader{*this});
     }
+
+    void enqueue_write(std::vector<uint8_t> data, WriteCallback callback)
+    {
+        asio::post(m_ctx, [this, data = std::move(data), cb = std::move(callback)]() mutable
+        {
+            bool write_in_progress = !m_write_queue.empty();
+            m_write_queue.push(WriteRequest{std::move(data), std::move(cb)});
+
+            if (!write_in_progress)
+            {
+                start_write_loop();
+            }
+        });
+    }
+
+    void start_write_loop()
+    {
+        if (m_write_queue.empty()) return;
+        auto& request = m_write_queue.front();
+
+        asio::async_write(m_port, asio::buffer(request.buffer.data(), request.buffer.size()),
+                          [this, request](const asio::error_code& ec, std::size_t bytes_transferred)
+                          {
+                              if (request.callback)
+                              {
+                                  request.callback(ec, bytes_transferred);
+                              }
+
+                              m_write_queue.pop();
+                              if (!ec)
+                              {
+                                  start_write_loop();
+                              }
+                              else
+                              {
+                                  std::queue<WriteRequest> empty_queue;
+                                  std::swap(m_write_queue, empty_queue);
+                                  // hardware error will be filtered inside
+                                  handle_disconnection(ec);
+                              }
+                          }
+        );
+    }
 };
 
 tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view name) const
@@ -201,10 +274,37 @@ void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t> data)
 {
     if (!m_impl->m_port.is_open()) return tl::make_unexpected(SerialError::DeviceDisconnected);
-    asio::error_code ec;
-    asio::write(m_impl->m_port, asio::buffer(data.data(), data.size()), ec);
-    if (ec) return tl::make_unexpected(ec);
-    return {};
+    std::vector temp_buf(data.begin(), data.end());
+
+    std::binary_semaphore sem{0};
+
+    tl::expected<void, std::error_code> res{};
+
+    m_impl->enqueue_write(std::move(temp_buf), [&sem, &res](const std::error_code& ec, std::size_t)
+    {
+        if (ec) res = tl::make_unexpected(ec);
+        // resume here
+        sem.release();
+    });
+
+    // stuck here
+    sem.acquire();
+
+    return res;
+}
+
+void Serial::async_write(std::span<const uint8_t> data, WriteCallback callback)
+{
+    if (!m_impl->m_port.is_open())
+    {
+        if (callback)
+        {
+            callback(SerialError::DeviceDisconnected, 0);
+        }
+        return;
+    }
+    std::vector temp_buf(data.begin(), data.end());
+    m_impl->enqueue_write(std::move(temp_buf), std::move(callback));
 }
 
 void Serial::close()
