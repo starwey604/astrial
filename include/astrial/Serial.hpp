@@ -14,7 +14,7 @@ public:
     friend class SerialBuilder;
 
     static SerialBuilder builder();
-    static std::vector<SerialPortInfo> list_ports();
+    static std::vector<SerialInfo> list_ports();
 
     ~Serial();
 
@@ -26,6 +26,9 @@ public:
     void on_data(std::function<void(std::span<const uint8_t>)> callback);
     tl::expected<void, std::error_code> write(std::span<const uint8_t> data);
     void close();
+
+    void on_disconnect(std::function<void(const std::error_code&)> callback);
+    void on_reconnect(std::function<void()> callback);
 
 private:
     Serial();

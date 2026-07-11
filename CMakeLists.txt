@@ -16,6 +16,7 @@ add_library(astrial
         src/astrial/SerialBuilder.cpp
         src/astrial/Types.cpp
         src/astrial/ports.cpp
+        src/astrial/detail.cpp
 )
 
 set(ASTRIAL_BUFFER_SIZE "4096" CACHE STRING "The default size of astrial serial backend buffer")

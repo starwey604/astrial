@@ -11,7 +11,7 @@ enum class StopBits { One, OnePointFive, Two };
 
 enum class DataBits { Five = 5, Six = 6, Seven = 7, Eight = 8 };
 
-struct SerialPortInfo
+struct SerialInfo
 {
     std::string port_name;
     std::string description;
@@ -21,7 +21,9 @@ struct SerialPortInfo
     std::string manufacturer;
 };
 
-std::ostream& operator<<(std::ostream& os, const SerialPortInfo& info);
+enum class SerialState { Disconnected, Connected, Reconnecting };
+
+std::ostream& operator<<(std::ostream& os, const SerialInfo& info);
 
 
 enum class SerialError

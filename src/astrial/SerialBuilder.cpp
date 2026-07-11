@@ -26,3 +26,10 @@ SerialBuilder& SerialBuilder::data_bits(const DataBits data_bits)
     m_data_bits = data_bits;
     return *this;
 }
+
+SerialBuilder& SerialBuilder::auto_reconnect(const bool enable, std::chrono::milliseconds interval)
+{
+    m_auto_reconnect = enable;
+    m_reconnect_interval = std::move(interval);
+    return *this;
+}

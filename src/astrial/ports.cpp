@@ -2,12 +2,16 @@
 #include <astrial/port.hpp>
 #include <astrial/Serial.hpp>
 
+#include <astrial/detail.hpp>
+
 #ifdef _WIN32
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
 // DEVPKEY_Device_BusReportedDeviceDesc  {540B947E-8B40-45BC-A8A2-6A0B894CBDA2}, 4
-static const DEVPROPKEY s_BusReportedDesc = { {0x540b947e,0x8b40,0x45bc,{0xa8,0xa2,0x6a,0x0b,0x89,0x4c,0xbd,0xa2}}, 4 };
+static const DEVPROPKEY s_BusReportedDesc = {
+    {0x540b947e, 0x8b40, 0x45bc, {0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2}}, 4
+};
 
 static std::string from_wstring(const wchar_t* src, int len = -1)
 {
@@ -17,50 +21,18 @@ static std::string from_wstring(const wchar_t* src, int len = -1)
     std::string result(needed, 0);
     WideCharToMultiByte(CP_ACP, 0, src, len, result.data(), needed, nullptr, nullptr);
     if (needed > 0 && result.back() == 0) result.pop_back();
-    while (!result.empty() && (result.back() == ' ' || result.back() == '\t' || result.back() == '\0')) result.pop_back();
+    while (!result.empty() && (result.back() == ' ' || result.back() == '\t' || result.back() == '\0'))
+        result.
+            pop_back();
     return result;
 }
 #endif
 
-namespace detail
-{
-#if defined(__linux__) || defined(__APPLE__)
-    std::string read_sys_file(const fs::path& path)
-    {
-        if (!fs::exists(path)) return "";
-        std::ifstream file(path);
-        std::string value;
-        if (std::getline(file, value))
-        {
-            return value;
-        }
-        return "";
-    }
+namespace fs = std::filesystem;
 
-    tl::expected<uint16_t, SerialError> parse_hex(const std::string& str)
-    {
-        if (str.empty()) return tl::make_unexpected(SerialError::ParseError);
-        try
-        {
-            auto value = std::stoul(str, nullptr, 16);
-            if (value > UINT16_MAX) return tl::make_unexpected(SerialError::ValueOutOfRange);
-            return static_cast<uint16_t>(value);
-        }
-        catch (const std::invalid_argument&)
-        {
-            return tl::make_unexpected(SerialError::ParseError);
-        }
-        catch (const std::out_of_range&)
-        {
-            return tl::make_unexpected(SerialError::ValueOutOfRange);
-        }
-    }
-#endif
-}
-
-std::vector<SerialPortInfo> Serial::list_ports()
+std::vector<SerialInfo> Serial::list_ports()
 {
-    std::vector<SerialPortInfo> ports;
+    std::vector<SerialInfo> ports;
 #if defined(__linux__) || defined(__APPLE__)
     try
     {
@@ -89,7 +61,7 @@ std::vector<SerialPortInfo> Serial::list_ports()
 
                 auto port_path = "/dev/" + name;
 
-                SerialPortInfo info;
+                SerialInfo info;
                 info.port_name = port_path;
                 info.description = "Astrial Serial Port";
 
@@ -140,7 +112,7 @@ std::vector<SerialPortInfo> Serial::list_ports()
 
     for (DWORD i = 0; SetupDiEnumDeviceInfo(device_info_set, i, &dev_info_data); ++i)
     {
-        SerialPortInfo info;
+        SerialInfo info;
 
         // Get COMx Port
         HKEY hkey = SetupDiOpenDevRegKey(device_info_set, &dev_info_data, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
@@ -257,7 +229,8 @@ std::vector<SerialPortInfo> Serial::list_ports()
                     {
                         wchar_t fallback[256] = {};
                         if (SetupDiGetDeviceRegistryPropertyW(parent_info, &parent_data, SPDRP_DEVICEDESC, nullptr,
-                                                              reinterpret_cast<PBYTE>(fallback), sizeof(fallback), nullptr))
+                                                              reinterpret_cast<PBYTE>(fallback), sizeof(fallback),
+                                                              nullptr))
                         {
                             info.description = from_wstring(fallback);
                         }

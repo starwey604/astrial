@@ -32,7 +32,7 @@ std::error_code make_error_code(SerialError e)
     return std::error_code(static_cast<int>(e), get_serial_category());
 }
 
-std::ostream& operator<<(std::ostream& os, const SerialPortInfo& info)
+std::ostream& operator<<(std::ostream& os, const SerialInfo& info)
 {
     os << "SerialPortInfo{";
     os << "port_name: \"" << info.port_name << "\", ";

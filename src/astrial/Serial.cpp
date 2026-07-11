@@ -1,25 +1,38 @@
 #include <astrial/Serial.hpp>
 #include <astrial/SerialBuilder.hpp>
+#include <astrial/detail.hpp>
 
 #include <asio.hpp>
 #include <thread>
-
-#ifdef _WIN32
-#include <winbase.h>
-#endif
 
 class Serial::Impl
 {
 public:
     asio::io_context m_ctx;
     asio::serial_port m_port;
+    std::string m_port_name;
+    uint32_t m_baud_rate{};
+    Parity m_parity{};
+    StopBits m_stop_bits{};
+    DataBits m_data_bits{DataBits::Eight};
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> m_work_guard;
+
+    asio::steady_timer m_reconnect_timer;
+
     std::jthread m_thread;
     std::array<uint8_t, ASTRIAL_BUFFER_LENGTH> m_rx_buffer{};
-    std::function<void(std::span<const uint8_t>)> m_callback;
-    bool m_read_started = false;
 
-    Impl() : m_ctx(1), m_port(m_ctx)
+    std::function<void(std::span<const uint8_t>)> m_data_callback;
+    std::function<void(const asio::error_code& code)> m_disconnect_callback;
+    std::function<void()> m_reconnect_callback;
+
+    bool m_read_started{false};
+    bool m_auto_reconnect{true};
+    std::chrono::milliseconds m_reconnect_interval{std::chrono::seconds(3)};
+    std::atomic<SerialState> m_state{SerialState::Disconnected};
+    std::atomic<bool> m_is_closed_by_user{true};
+
+    Impl() : m_ctx(1), m_port(m_ctx), m_reconnect_timer(m_ctx)
     {
     };
 
@@ -31,31 +44,90 @@ public:
     void close()
     {
         asio::error_code ec;
+
+        m_is_closed_by_user.store(true, std::memory_order_release);
+        m_reconnect_timer.cancel();
+
         if (m_port.is_open()) m_port.close(ec);
         m_work_guard.reset();
         m_ctx.stop();
         if (m_thread.joinable()) m_thread.join();
+
+        m_state.store(SerialState::Disconnected, std::memory_order_release);
     }
 
-    void start_read()
+    void handle_disconnection(const std::error_code& ec)
+    {
+        // shutdown port first
+        asio::error_code close_ec;
+        m_port.close(close_ec);
+        m_state.store(SerialState::Disconnected, std::memory_order_release);
+
+        // notifying user
+        if (m_disconnect_callback)
+        {
+            m_disconnect_callback(ec);
+        }
+
+        // reconnect if needed
+        if (m_auto_reconnect && !m_is_closed_by_user.load(std::memory_order_acquire))
+        {
+            m_state.store(SerialState::Reconnecting, std::memory_order_release);
+            schedule_reconnect();
+        }
+    }
+
+    void schedule_reconnect()
+    {
+        if (m_is_closed_by_user) return;
+
+        m_reconnect_timer.expires_after(m_reconnect_interval);
+        m_reconnect_timer.async_wait([this](const asio::error_code& timer_ec)
+        {
+            if (timer_ec) // timer was canceled, exiting
+            {
+                return;
+            }
+
+            // try re-opening port
+            (void)detail::try_configure_port(m_port, m_port_name, m_baud_rate,
+                                             m_parity, m_stop_bits, m_data_bits)
+                 .or_else([this](auto&&) { schedule_reconnect(); }) // failed, try later
+                 .and_then([this]-> tl::expected<void, std::error_code>
+                  {
+                      m_state.store(SerialState::Connected, std::memory_order_release);
+                      start_read_loop();
+                      // notifying user
+                      if (m_reconnect_callback) m_reconnect_callback();
+                      return {};
+                  });
+        });
+    }
+
+    void start_read_loop()
     {
         if (m_read_started) return;
         m_read_started = true;
 
-        struct Reader
+        m_port.async_read_some(asio::buffer(m_rx_buffer), [this](const asio::error_code& ec, std::size_t bytes)
         {
-            Impl& impl_ref;
-
-            void operator()(const asio::error_code& ec, std::size_t bytes)
+            if (!ec)
             {
-                if (!ec && bytes > 0)
+                if (bytes > 0)
                 {
-                    impl_ref.m_callback(std::span<const uint8_t>(impl_ref.m_rx_buffer.data(), bytes));
+                    m_data_callback(std::span<const uint8_t>(m_rx_buffer.data(), bytes));
                 }
-                impl_ref.m_port.async_read_some(asio::buffer(impl_ref.m_rx_buffer), *this);
+                start_read_loop();
             }
-        };
-        m_port.async_read_some(asio::buffer(m_rx_buffer), Reader{*this});
+            else
+            {
+                if (ec == asio::error::operation_aborted && m_is_closed_by_user.load(std::memory_order_acquire))
+                {
+                    return;
+                }
+                handle_disconnection(ec);
+            }
+        });
     }
 };
 
@@ -64,64 +136,17 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     Serial serial;
     auto& impl = *serial.m_impl;
 
-    asio::error_code ec;
+    auto result = detail::try_configure_port(impl.m_port, name, m_rate, m_parity, m_stop_bits, m_data_bits);
+    if (!result) return tl::make_unexpected(result.error());
 
-    // try open
-    impl.m_port.open(std::string(name), ec);
-    if (ec) return tl::make_unexpected(ec);
-
-    // performance optimization
-
-#ifdef _WIN32
-    ::SetupComm(impl.m_port.native_handle(), 65536, 65536);
-#elif  defined(__linux__)
-#include <sys/ioctl.h>
-#include <linux/serial.h>
-    int fd = impl.m_port.native_handle();
-    serial_struct serial_opts{};
-    if (::ioctl(fd, TIOCGSERIAL, &serial_opts) == 0)
-    {
-        serial_opts.flags |= ASYNC_LOW_LATENCY;
-        ::ioctl(fd, TIOCSSERIAL, &serial_opts);
-    }
-#endif
-
-    // try set baud rate
-    impl.m_port.set_option(asio::serial_port_base::baud_rate(m_rate), ec);
-    if (ec) return tl::make_unexpected(ec);
-
-    // parity
-    asio::serial_port_base::parity::type asio_parity;
-    switch (m_parity)
-    {
-    case Parity::Even: asio_parity = asio::serial_port_base::parity::even;
-        break;
-    case Parity::Odd: asio_parity = asio::serial_port_base::parity::odd;
-        break;
-    default: asio_parity = asio::serial_port_base::parity::none;
-        break;
-    }
-
-    impl.m_port.set_option(asio::serial_port_base::parity(asio_parity), ec);
-    if (ec) return tl::make_unexpected(ec);
-
-    // stop bits
-    asio::serial_port_base::stop_bits::type asio_stop;
-    switch (m_stop_bits)
-    {
-    case StopBits::OnePointFive: asio_stop = asio::serial_port_base::stop_bits::onepointfive;
-        break;
-    case StopBits::Two: asio_stop = asio::serial_port_base::stop_bits::two;
-        break;
-    default: asio_stop = asio::serial_port_base::stop_bits::one;
-        break;
-    }
-    impl.m_port.set_option(asio::serial_port_base::stop_bits(asio_stop), ec);
-    if (ec) return tl::make_unexpected(ec);
-
-    // data bits
-    impl.m_port.set_option(asio::serial_port_base::character_size(static_cast<unsigned int>(m_data_bits)), ec);
-    if (ec) return tl::make_unexpected(ec);
+    // other param
+    impl.m_port_name = name;
+    impl.m_baud_rate = m_rate;
+    impl.m_parity = m_parity;
+    impl.m_stop_bits = m_stop_bits;
+    impl.m_data_bits = m_data_bits;
+    impl.m_auto_reconnect = m_auto_reconnect;
+    impl.m_reconnect_interval = m_reconnect_interval;
 
     // background thread setup
     impl.m_work_guard = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
@@ -138,7 +163,7 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     return std::move(serial);
 }
 
-tl::expected<Serial, std::error_code> SerialBuilder::open(const SerialPortInfo& info) const
+tl::expected<Serial, std::error_code> SerialBuilder::open(const SerialInfo& info) const
 {
     return open(info.port_name);
 }
@@ -157,8 +182,9 @@ void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 {
     if (callback)
     {
-        m_impl->m_callback = std::move(callback);
-        m_impl->start_read();
+        //TODO: this is not atomic, need protect for concurrency
+        m_impl->m_data_callback = std::move(callback);
+        m_impl->start_read_loop();
     }
 }
 
@@ -174,6 +200,14 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
 void Serial::close()
 {
     m_impl->close();
+}
+
+void Serial::on_disconnect(std::function<void(const std::error_code&)> callback)
+{
+}
+
+void Serial::on_reconnect(std::function<void()> callback)
+{
 }
 
 Serial::Serial() : m_impl(std::make_unique<Impl>())
