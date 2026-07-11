@@ -42,6 +42,7 @@ public:
     std::function<void()> m_reconnect_callback;
 
     bool m_read_started{false};
+    bool m_write_in_flight{false};
     bool m_auto_reconnect{true};
     std::chrono::milliseconds m_reconnect_interval{std::chrono::seconds(3)};
     std::atomic<SerialState> m_state{SerialState::Disconnected};
@@ -76,22 +77,18 @@ public:
         // filter error
         if (ec == asio::error::operation_aborted)
         {
+            // Port was intentionally closed (e.g. Serial::close()): do not
+            // notify or attempt reconnect.
             return;
         }
 
-#if defined(_WIN32)
-        if (ec.value() == ERROR_DEVICE_REMOVED ||
-            ec.value() == ERROR_ACCESS_DENIED ||
-            ec.value() == ERROR_GEN_FAILURE)
+        // Ignore re-entrant notifications: a physical unplug can surface on
+        // both the read and an in-flight write completion, and we only want a
+        // single on_disconnect / reconnect sequence.
+        if (m_state.load(std::memory_order_acquire) != SerialState::Connected)
         {
             return;
         }
-#else
-        if (ec.value() == ENODEV || ec.value() == EIO || ec.value() == ENXIO)
-        {
-            return;
-        }
-#endif
 
         // shutdown port first
         asio::error_code close_ec;
@@ -133,6 +130,7 @@ public:
                   {
                       m_state.store(SerialState::Connected, std::memory_order_release);
                       start_read_loop();
+                      start_write_loop();
                       // notifying user
                       if (m_reconnect_callback) m_reconnect_callback();
                       return {};
@@ -193,25 +191,39 @@ public:
 
     void start_write_loop()
     {
+        if (m_write_in_flight) return;
         auto request = m_write_queue.peek();
         if (request == nullptr) return; // empty
 
+        m_write_in_flight = true;
         asio::async_write(m_port, asio::buffer(request->buffer.data(), request->buffer.size()),
                           [this, request](const asio::error_code& ec, std::size_t bytes_transferred)
                           {
-                              if (request->callback)
-                              {
-                                  request->callback(ec, bytes_transferred);
-                              }
-                              if (request->signal_sem) request->signal_sem->release();
+                              m_write_in_flight = false;
                               if (!ec)
                               {
+                                  if (request->callback)
+                                  {
+                                      request->callback(ec, bytes_transferred);
+                                  }
+                                  if (request->signal_sem) request->signal_sem->release();
                                   m_write_queue.pop();
                                   start_write_loop();
                               }
                               else
                               {
-                                  // hardware error will be filtered inside
+                                  // Port is broken: fail the current request and every
+                                  // pending one so no caller blocks forever on its
+                                  // semaphore/res. The failed item is also popped here,
+                                  // otherwise it would stay at the head and poison the
+                                  // queue (subsequent writes would never start).
+                                  while (auto* req = m_write_queue.peek())
+                                  {
+                                      if (req->callback) req->callback(ec, 0);
+                                      if (req->signal_sem) req->signal_sem->release();
+                                      if (req->res) *req->res = tl::make_unexpected(ec);
+                                      m_write_queue.pop();
+                                  }
                                   handle_disconnection(ec);
                               }
                           }
