@@ -11,7 +11,7 @@ option(BUILD_EXAMPLE "Build example" ON)
 add_subdirectory(3rdparty)
 
 add_library(astrial
-        src/astrail.cpp
+        src/astrial.cpp
         src/astrial/Serial.cpp
         src/astrial/SerialBuilder.cpp
         src/astrial/Types.cpp
@@ -19,7 +19,8 @@ add_library(astrial
         src/astrial/detail.cpp
 )
 
-set(ASTRIAL_BUFFER_SIZE "4096" CACHE STRING "The default size of astrial serial backend buffer")
+set(ASTRIAL_READ_BUFFER_SIZE "4096" CACHE STRING "The default size of astrial serial backend read buffer")
+set(ASTRIAL_WRITE_BUFFER_SIZE "4096" CACHE STRING "The default size of astrial serial backend write buffer")
 
 target_include_directories(astrial PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -29,7 +30,7 @@ if (WIN32)
     target_compile_options(astrial PRIVATE /utf-8)
 endif ()
 
-target_link_libraries(astrial PUBLIC tl-expected PRIVATE asio_standalone)
+target_link_libraries(astrial PUBLIC tl-expected readerwriterqueue PRIVATE asio_standalone)
 
 if (WIN32)
     target_link_libraries(astrial PRIVATE setupapi cfgmgr32)
@@ -39,7 +40,8 @@ if (UNIX)
     include(UseIoUring)
 endif ()
 
-target_compile_definitions(astrial PUBLIC ASTRIAL_BUFFER_LENGTH=${ASTRIAL_BUFFER_SIZE})
+target_compile_definitions(astrial PUBLIC ASTRIAL_READ_BUFFER_LENGTH=${ASTRIAL_READ_BUFFER_SIZE})
+target_compile_definitions(astrial PUBLIC ASTRIAL_WRITE_BUFFER_LENGTH=${ASTRIAL_WRITE_BUFFER_SIZE})
 
 if (BUILD_EXAMPLE)
     add_subdirectory(examples)

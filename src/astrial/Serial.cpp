@@ -3,6 +3,8 @@
 #include <astrial/detail.hpp>
 
 #include <asio.hpp>
+#include <memory_resource>
+#include <readerwriterqueue.h>
 #include <queue>
 #include <thread>
 #include <semaphore>
@@ -22,15 +24,18 @@ public:
     asio::steady_timer m_reconnect_timer;
 
     std::jthread m_thread;
-    std::array<uint8_t, ASTRIAL_BUFFER_LENGTH> m_rx_buffer{};
+    std::array<uint8_t, ASTRIAL_READ_BUFFER_LENGTH> m_rx_buffer{};
 
-    struct WriteRequest
+    struct AsyncWriteReq
     {
-        std::vector<uint8_t> buffer;
+        std::pmr::vector<uint8_t> buffer;
         WriteCallback callback;
+        std::binary_semaphore* signal_sem;
+        tl::expected<void, std::error_code>* res;
     };
 
-    std::queue<WriteRequest> m_write_queue;
+    moodycamel::ReaderWriterQueue<AsyncWriteReq, ASTRIAL_WRITE_BUFFER_LENGTH> m_write_queue;
+    std::pmr::unsynchronized_pool_resource m_pool_resource;
 
     std::function<void(std::span<const uint8_t>)> m_data_callback;
     std::function<void(const asio::error_code& code)> m_disconnect_callback;
@@ -169,42 +174,36 @@ public:
         m_port.async_read_some(asio::buffer(m_rx_buffer), Reader{*this});
     }
 
-    void enqueue_write(std::vector<uint8_t> data, WriteCallback callback)
+    void enqueue_write(const std::span<const uint8_t> data, WriteCallback callback)
     {
-        asio::post(m_ctx, [this, data = std::move(data), cb = std::move(callback)]() mutable
+        asio::post(m_ctx, [this, data, cb = std::move(callback)]() mutable
         {
-            bool write_in_progress = !m_write_queue.empty();
-            m_write_queue.push(WriteRequest{std::move(data), std::move(cb)});
-
-            if (!write_in_progress)
-            {
-                start_write_loop();
-            }
+            const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
+            std::pmr::vector temp_buf(data.begin(), data.end(), alloc);
+            m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(cb)});
         });
     }
 
     void start_write_loop()
     {
-        if (m_write_queue.empty()) return;
-        auto& request = m_write_queue.front();
+        auto request = m_write_queue.peek();
+        if (request == nullptr) return; // empty
 
-        asio::async_write(m_port, asio::buffer(request.buffer.data(), request.buffer.size()),
+        asio::async_write(m_port, asio::buffer(request->buffer.data(), request->buffer.size()),
                           [this, request](const asio::error_code& ec, std::size_t bytes_transferred)
                           {
-                              if (request.callback)
+                              if (request->callback)
                               {
-                                  request.callback(ec, bytes_transferred);
+                                  request->callback(ec, bytes_transferred);
                               }
-
-                              m_write_queue.pop();
+                              if (request->signal_sem) request->signal_sem->release();
                               if (!ec)
                               {
+                                  m_write_queue.pop();
                                   start_write_loop();
                               }
                               else
                               {
-                                  std::queue<WriteRequest> empty_queue;
-                                  std::swap(m_write_queue, empty_queue);
                                   // hardware error will be filtered inside
                                   handle_disconnection(ec);
                               }
@@ -274,18 +273,26 @@ void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t> data)
 {
     if (!m_impl->m_port.is_open()) return tl::make_unexpected(SerialError::DeviceDisconnected);
-    std::vector temp_buf(data.begin(), data.end());
+
+    const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_impl->m_pool_resource);
+    std::pmr::vector temp_buf(data.begin(), data.end(), alloc);
 
     std::binary_semaphore sem{0};
-
     tl::expected<void, std::error_code> res{};
 
-    m_impl->enqueue_write(std::move(temp_buf), [&sem, &res](const std::error_code& ec, std::size_t)
-    {
-        if (ec) res = tl::make_unexpected(ec);
-        // resume here
-        sem.release();
+    const bool was_empty = m_impl->m_write_queue.peek() == nullptr;
+    m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
+        std::move(temp_buf), {}, &sem, &res
     });
+
+    if (was_empty)
+    {
+        // post when spsc queue become empty
+        asio::post(m_impl->m_ctx, [this]
+        {
+            m_impl->start_write_loop();
+        });
+    }
 
     // stuck here
     sem.acquire();
@@ -293,7 +300,7 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     return res;
 }
 
-void Serial::async_write(std::span<const uint8_t> data, WriteCallback callback)
+void Serial::async_write(const std::span<const uint8_t> data, WriteCallback callback)
 {
     if (!m_impl->m_port.is_open())
     {
@@ -303,8 +310,7 @@ void Serial::async_write(std::span<const uint8_t> data, WriteCallback callback)
         }
         return;
     }
-    std::vector temp_buf(data.begin(), data.end());
-    m_impl->enqueue_write(std::move(temp_buf), std::move(callback));
+    m_impl->enqueue_write(data, std::move(callback));
 }
 
 void Serial::close()
