@@ -30,7 +30,7 @@ public:
     bool m_auto_reconnect{true};
     std::chrono::milliseconds m_reconnect_interval{std::chrono::seconds(3)};
     std::atomic<SerialState> m_state{SerialState::Disconnected};
-    std::atomic<bool> m_is_closed_by_user{true};
+    std::atomic<bool> m_is_closed_by_user{false};
 
     Impl() : m_ctx(1), m_port(m_ctx), m_reconnect_timer(m_ctx)
     {
@@ -61,6 +61,7 @@ public:
         // shutdown port first
         asio::error_code close_ec;
         m_port.close(close_ec);
+        m_read_started = false;
         m_state.store(SerialState::Disconnected, std::memory_order_release);
 
         // notifying user
@@ -93,7 +94,7 @@ public:
             (void)detail::try_configure_port(m_port, m_port_name, m_baud_rate,
                                              m_parity, m_stop_bits, m_data_bits)
                  .or_else([this](auto&&) { schedule_reconnect(); }) // failed, try later
-                 .and_then([this]-> tl::expected<void, std::error_code>
+                 .and_then([this]() -> tl::expected<void, std::error_code>
                   {
                       m_state.store(SerialState::Connected, std::memory_order_release);
                       start_read_loop();
@@ -109,25 +110,33 @@ public:
         if (m_read_started) return;
         m_read_started = true;
 
-        m_port.async_read_some(asio::buffer(m_rx_buffer), [this](const asio::error_code& ec, std::size_t bytes)
+        struct Reader
         {
-            if (!ec)
+            Impl& impl;
+
+            void operator()(const asio::error_code& ec, std::size_t bytes)
             {
-                if (bytes > 0)
+                if (!ec)
                 {
-                    m_data_callback(std::span<const uint8_t>(m_rx_buffer.data(), bytes));
+                    if (bytes > 0 && impl.m_data_callback)
+                    {
+                        impl.m_data_callback(std::span<const uint8_t>(impl.m_rx_buffer.data(), bytes));
+                    }
+                    impl.m_port.async_read_some(asio::buffer(impl.m_rx_buffer), *this);
                 }
-                start_read_loop();
-            }
-            else
-            {
-                if (ec == asio::error::operation_aborted && m_is_closed_by_user.load(std::memory_order_acquire))
+                else
                 {
-                    return;
+                    if (ec == asio::error::operation_aborted && impl.m_is_closed_by_user.
+                                                                     load(std::memory_order_acquire))
+                    {
+                        return;
+                    }
+                    impl.m_read_started = false;
+                    impl.handle_disconnection(ec);
                 }
-                handle_disconnection(ec);
             }
-        });
+        };
+        m_port.async_read_some(asio::buffer(m_rx_buffer), Reader{*this});
     }
 };
 
@@ -160,6 +169,7 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
         impl.m_ctx.run();
     });
 
+    impl.m_state.store(SerialState::Connected, std::memory_order_release);
     return std::move(serial);
 }
 
@@ -204,10 +214,12 @@ void Serial::close()
 
 void Serial::on_disconnect(std::function<void(const std::error_code&)> callback)
 {
+    m_impl->m_disconnect_callback = std::move(callback);
 }
 
 void Serial::on_reconnect(std::function<void()> callback)
 {
+    m_impl->m_reconnect_callback = std::move(callback);
 }
 
 Serial::Serial() : m_impl(std::make_unique<Impl>())
