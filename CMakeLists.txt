@@ -7,6 +7,7 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(BUILD_EXAMPLE "Build example" ON)
+option(ASTRIAL_IO_URING "Try enabling io_uring backend for Astrial library" ON)
 
 add_subdirectory(3rdparty)
 
@@ -36,7 +37,7 @@ if (WIN32)
     target_link_libraries(astrial PRIVATE setupapi cfgmgr32)
 endif ()
 
-if (UNIX)
+if (UNIX AND ASTRIAL_IO_URING)
     include(UseIoUring)
 endif ()
 
