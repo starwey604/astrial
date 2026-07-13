@@ -175,7 +175,7 @@ public:
     void enqueue_write(const std::span<const uint8_t> data, WriteCallback callback)
     {
         const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
-        std::pmr::vector temp_buf(data.begin(), data.end(), alloc);
+        std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
 
         const bool was_empty = m_write_queue.peek() == nullptr;
         m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(callback)});
@@ -294,7 +294,7 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     if (!m_impl->m_port.is_open()) return tl::make_unexpected(SerialError::DeviceDisconnected);
 
     const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_impl->m_pool_resource);
-    std::pmr::vector temp_buf(data.begin(), data.end(), alloc);
+    std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
 
     std::binary_semaphore sem{0};
     tl::expected<void, std::error_code> res{};
