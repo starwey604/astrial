@@ -15,7 +15,7 @@ class SerialBuilder
 {
 public:
     SerialBuilder() = default;
-    SerialBuilder& buad_rate(uint32_t rate);
+    SerialBuilder& baud_rate(uint32_t rate);
     SerialBuilder& parity(Parity parity);
     SerialBuilder& stop_bits(StopBits stop_bits);
     SerialBuilder& data_bits(DataBits data_bits);

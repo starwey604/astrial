@@ -10,7 +10,7 @@ int main()
 {
     auto serial =
         Serial::builder()
-       .buad_rate(115200)
+       .baud_rate(115200)
        .parity(Parity::None)
        .stop_bits(StopBits::One)
        .open("/dev/ttyACM0")

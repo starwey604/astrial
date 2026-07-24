@@ -3,7 +3,7 @@
 
 #include "asio/error_code.hpp"
 
-SerialBuilder& SerialBuilder::buad_rate(const uint32_t rate)
+SerialBuilder& SerialBuilder::baud_rate(const uint32_t rate)
 {
     m_rate = rate;
     return *this;

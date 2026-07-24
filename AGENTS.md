@@ -11,10 +11,10 @@ cmake --build build
 
 - Requires CMake >= 3.22, C++20 compiler.
 - `BUILD_EXAMPLE` ON by default; pass `-DBUILD_EXAMPLE=OFF` to skip examples.
-- Receive buffer size: `-DASTRIAL_BUFFER_SIZE=<bytes>` (default 4096), exposed as `ASTRIAL_BUFFER_LENGTH` define.
-- Vendored deps: `3rdparty/asio`, `3rdparty/tl-expected` — no package manager needed.
-- Linux: io_uring auto-detected (kernel >= 5.15 + liburing), falls back to epoll.
-- Windows: links `setupapi` + `cfgfmgr32` automatically.
+- Buffer sizes: `-DASTRIAL_READ_BUFFER_SIZE=<bytes>` / `-DASTRIAL_WRITE_BUFFER_SIZE=<bytes>` (default 4096), exposed as `ASTRIAL_READ_BUFFER_LENGTH` / `ASTRIAL_WRITE_BUFFER_LENGTH`.
+- Vendored deps: `3rdparty/asio`, `3rdparty/tl-expected`, `3rdparty/readerwriterqueue` — no package manager needed.
+- `-DASTRIAL_IO_URING=OFF` to skip io_uring detection. Auto-detected on Linux (kernel >= 5.15 + liburing), falls back to epoll.
+- Windows: links `setupapi` + `cfgfmgr32` automatically. LTO enabled by default.
 
 ## No tests / no CI / no linter
 
@@ -30,13 +30,13 @@ cmake --build build
 | `include/astrial/*.hpp` | Public API: `Serial`, `SerialBuilder`, `Types`, `port.hpp` |
 | `src/astrial/*.cpp` | Implementation matching headers |
 | `src/astrail.cpp` | Single `#include <astrial.hpp>` (note: `astrail` vs `astrial`) |
-| `examples/` | Three example executables: `01_connect`, `01_list_ports`, `02_reconnect` (link `astrial`) |
+| `examples/` | Four example executables: `01_connect`, `01_list_ports`, `02_reconnect`, `02_async_write` (link `astrial`) |
 
 ### API usage pattern
 
 ```cpp
 auto serial = Serial::builder()
-    .buad_rate(115200)
+    .baud_rate(115200)
     .parity(Parity::None)
     .stop_bits(StopBits::One)
     .open("/dev/ttyACM0")
@@ -49,9 +49,11 @@ serial.write(cmd); // synchronous write
 
 - `Serial` is move-only (delete copy). Uses PIMPL with background `asio::io_context` thread.
 - `SerialBuilder` returns `tl::expected<Serial, std::error_code>`.
+- Builder supports `baud_rate`, `parity`, `stop_bits`, `data_bits`, `auto_reconnect`.
 - Port listing: `Serial::list_ports()` returns `std::vector<SerialInfo>`.
 - `SerialBuilder::open()` has two overloads: by name (`std::string_view`, e.g. `"/dev/ttyACM0"`) or by `SerialInfo`.
 - `write()` is synchronous but returns `tl::expected<void, std::error_code>` (not `void`). `async_write()` exists for async.
+- Callbacks: `on_data`, `on_disconnect`, `on_reconnect`. `close()` tears down the connection.
 
 ## Platform notes
 

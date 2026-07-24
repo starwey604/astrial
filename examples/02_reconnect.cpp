@@ -7,7 +7,7 @@ int main()
 {
     auto serial =
         Serial::builder()
-       .buad_rate(115200)
+       .baud_rate(115200)
        .parity(Parity::None)
        .stop_bits(StopBits::One)
        .auto_reconnect(true, std::chrono::seconds(2))
