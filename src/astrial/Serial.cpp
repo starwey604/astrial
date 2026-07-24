@@ -35,6 +35,7 @@ public:
     };
 
     moodycamel::ReaderWriterQueue<AsyncWriteReq, ASTRIAL_WRITE_BUFFER_LENGTH> m_write_queue;
+    std::atomic<size_t> m_write_count{0};
     std::pmr::unsynchronized_pool_resource m_pool_resource;
 
     std::function<void(std::span<const uint8_t>)> m_data_callback;
@@ -177,10 +178,13 @@ public:
         const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
         std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
 
-        const bool was_empty = m_write_queue.peek() == nullptr;
         m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(callback)});
 
-        if (was_empty)
+        // Track pending items with an atomic counter instead of calling
+        // peek() from the producer thread.  peek() writes consumer-owned
+        // state (localTail) and must only be called from the consumer.
+        // Signal the consumer only on the 0→1 transition.
+        if (m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
         {
             asio::post(m_ctx, [this]
             {
@@ -208,7 +212,15 @@ public:
                                   }
                                   if (request->signal_sem) request->signal_sem->release();
                                   m_write_queue.pop();
-                                  start_write_loop();
+
+                                  // m_write_count includes the just-completed
+                                  // in-flight item.  After decrement, a value
+                                  // > 1 means at least one more item is queued
+                                  // and the consumer should keep running.
+                                  if (m_write_count.fetch_sub(1, std::memory_order_acq_rel) > 1)
+                                  {
+                                      start_write_loop();
+                                  }
                               }
                               else
                               {
@@ -223,6 +235,9 @@ public:
                                       if (req->signal_sem) req->signal_sem->release();
                                       if (req->res) *req->res = tl::make_unexpected(ec);
                                       m_write_queue.pop();
+                                      // Each drained item must be accounted for so the
+                                      // counter stays in sync with the actual queue.
+                                      m_write_count.fetch_sub(1, std::memory_order_acq_rel);
                                   }
                                   handle_disconnection(ec);
                               }
@@ -299,21 +314,22 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     std::binary_semaphore sem{0};
     tl::expected<void, std::error_code> res{};
 
-    const bool was_empty = m_impl->m_write_queue.peek() == nullptr;
     m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
         std::move(temp_buf), {}, &sem, &res
     });
 
-    if (was_empty)
+    // Track pending items with an atomic counter instead of calling
+    // peek() from the producer thread.  peek() writes consumer-owned
+    // state (localTail) and must only be called from the consumer.
+    // Signal the consumer only on the 0→1 transition.
+    if (m_impl->m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
     {
-        // post when spsc queue become empty
         asio::post(m_impl->m_ctx, [this]
         {
             m_impl->start_write_loop();
         });
     }
 
-    // stuck here
     sem.acquire();
 
     return res;
