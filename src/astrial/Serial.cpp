@@ -158,6 +158,10 @@ public:
                     }
                     impl.m_port.async_read_some(asio::buffer(impl.m_rx_buffer), *this);
                 }
+                else if (ec == asio::error::interrupted)
+                {
+                    impl.m_port.async_read_some(asio::buffer(impl.m_rx_buffer), *this);
+                }
                 else
                 {
                     if (ec == asio::error::operation_aborted && impl.m_is_closed_by_user.
@@ -221,6 +225,13 @@ public:
                                   {
                                       start_write_loop();
                                   }
+                              }
+                              else if (ec == asio::error::interrupted)
+                              {
+                                  // EINTR is transient: keep the request at the
+                                  // head of the queue and retry without dropping
+                                  // data or triggering a disconnect.
+                                  start_write_loop();
                               }
                               else
                               {
