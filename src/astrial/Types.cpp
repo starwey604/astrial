@@ -17,6 +17,7 @@ std::string SerialErrorCategory::message(int ev) const
     case SerialError::DeviceDisconnected: return "DeviceDisconnected";
     case SerialError::ParseError: return "ParseError";
     case SerialError::ValueOutOfRange: return "ValueOutOfRange";
+    case SerialError::WriteTimeout: return "WriteTimeout";
     default: return "UnknownError";
     }
 }

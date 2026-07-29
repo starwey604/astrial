@@ -1,6 +1,7 @@
 #ifndef ASTRIAL_SERIAL_HPP
 #define ASTRIAL_SERIAL_HPP
 
+#include <chrono>
 #include <memory>
 #include <span>
 
@@ -25,6 +26,7 @@ public:
 
     void on_data(std::function<void(std::span<const uint8_t>)> callback);
     tl::expected<void, std::error_code> write(std::span<const uint8_t> data);
+    tl::expected<void, std::error_code> write(std::span<const uint8_t> data, std::chrono::milliseconds timeout);
 
     using WriteCallback = std::function<void(const std::error_code&, std::size_t)>;
     void async_write(std::span<const uint8_t> data, WriteCallback callback);

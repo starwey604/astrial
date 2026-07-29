@@ -35,6 +35,7 @@ enum class SerialError
     DeviceDisconnected, // 设备意外断开
     ParseError, // 字符串解析失败（如无效的十六进制字符串）
     ValueOutOfRange, // 值超出范围
+    WriteTimeout, // 同步写超时
     UnknownError
 };
 

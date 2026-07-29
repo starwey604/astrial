@@ -7,7 +7,7 @@
 #include <readerwriterqueue.h>
 #include <queue>
 #include <thread>
-#include <semaphore>
+#include <future>
 
 class Serial::Impl
 {
@@ -28,8 +28,7 @@ public:
 
     struct SyncWriteState
     {
-        std::binary_semaphore sem{0};
-        tl::expected<void, std::error_code> result{};
+        std::promise<tl::expected<void, std::error_code>> promise;
     };
 
     struct AsyncWriteReq
@@ -70,8 +69,7 @@ public:
             if (req->callback) req->callback(ec, 0);
             if (req->sync_state)
             {
-                req->sync_state->result = tl::make_unexpected(ec);
-                req->sync_state->sem.release();
+                req->sync_state->promise.set_value(tl::make_unexpected(ec));
             }
             m_write_queue.pop();
             m_write_count.fetch_sub(1, std::memory_order_acq_rel);
@@ -237,10 +235,10 @@ public:
                                   {
                                       request->callback(ec, bytes_transferred);
                                   }
-                                  if (request->sync_state)
-                                  {
-                                      request->sync_state->sem.release();
-                                  }
+                                   if (request->sync_state)
+                                   {
+                                       request->sync_state->promise.set_value({});
+                                   }
                                   m_write_queue.pop();
 
                                   if (m_write_count.fetch_sub(1, std::memory_order_acq_rel) > 1)
@@ -327,6 +325,7 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
 
     auto state = std::make_shared<Impl::SyncWriteState>();
+    auto future = state->promise.get_future();
 
     m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
         std::move(temp_buf), {}, state
@@ -340,9 +339,36 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
         });
     }
 
-    state->sem.acquire();
+    return future.get();
+}
 
-    return state->result;
+tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t> data, std::chrono::milliseconds timeout)
+{
+    if (!m_impl->m_port.is_open()) return tl::make_unexpected(SerialError::DeviceDisconnected);
+
+    const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_impl->m_pool_resource);
+    std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
+
+    auto state = std::make_shared<Impl::SyncWriteState>();
+    auto future = state->promise.get_future();
+
+    m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
+        std::move(temp_buf), {}, state
+    });
+
+    if (m_impl->m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
+    {
+        asio::post(m_impl->m_ctx, [this]
+        {
+            m_impl->start_write_loop();
+        });
+    }
+
+    if (future.wait_for(timeout) == std::future_status::ready)
+    {
+        return future.get();
+    }
+    return tl::make_unexpected(make_error_code(SerialError::WriteTimeout));
 }
 
 void Serial::async_write(const std::span<const uint8_t> data, WriteCallback callback)
