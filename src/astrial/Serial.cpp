@@ -312,12 +312,11 @@ Serial& Serial::operator=(Serial&&) noexcept = default;
 
 void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 {
-    if (callback)
+    asio::post(m_impl->m_ctx, [this, cb = std::move(callback)]() mutable
     {
-        //TODO: this is not atomic, need protect for concurrency
-        m_impl->m_data_callback = std::move(callback);
+        m_impl->m_data_callback = std::move(cb);
         m_impl->start_read_loop();
-    }
+    });
 }
 
 tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t> data)
@@ -366,12 +365,18 @@ void Serial::close()
 
 void Serial::on_disconnect(std::function<void(const std::error_code&)> callback)
 {
-    m_impl->m_disconnect_callback = std::move(callback);
+    asio::post(m_impl->m_ctx, [this, cb = std::move(callback)]() mutable
+    {
+        m_impl->m_disconnect_callback = std::move(cb);
+    });
 }
 
 void Serial::on_reconnect(std::function<void()> callback)
 {
-    m_impl->m_reconnect_callback = std::move(callback);
+    asio::post(m_impl->m_ctx, [this, cb = std::move(callback)]() mutable
+    {
+        m_impl->m_reconnect_callback = std::move(cb);
+    });
 }
 
 Serial::Serial() : m_impl(std::make_unique<Impl>())
