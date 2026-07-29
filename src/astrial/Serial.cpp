@@ -26,12 +26,17 @@ public:
     std::jthread m_thread;
     std::array<uint8_t, ASTRIAL_READ_BUFFER_LENGTH> m_rx_buffer{};
 
+    struct SyncWriteState
+    {
+        std::binary_semaphore sem{0};
+        tl::expected<void, std::error_code> result{};
+    };
+
     struct AsyncWriteReq
     {
         std::pmr::vector<uint8_t> buffer;
         WriteCallback callback;
-        std::binary_semaphore* signal_sem;
-        tl::expected<void, std::error_code>* res;
+        std::shared_ptr<SyncWriteState> sync_state;
     };
 
     moodycamel::ReaderWriterQueue<AsyncWriteReq, ASTRIAL_WRITE_BUFFER_LENGTH> m_write_queue;
@@ -58,14 +63,36 @@ public:
         close();
     }
 
+    void drain_all_writes(const std::error_code& ec)
+    {
+        while (auto* req = m_write_queue.peek())
+        {
+            if (req->callback) req->callback(ec, 0);
+            if (req->sync_state)
+            {
+                req->sync_state->result = tl::make_unexpected(ec);
+                req->sync_state->sem.release();
+            }
+            m_write_queue.pop();
+            m_write_count.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+
     void close()
     {
-        asio::error_code ec;
-
         m_is_closed_by_user.store(true, std::memory_order_release);
         m_reconnect_timer.cancel();
 
-        if (m_port.is_open()) m_port.close(ec);
+        asio::post(m_ctx, [this]
+        {
+            if (m_port.is_open())
+            {
+                asio::error_code ec;
+                m_port.close(ec);
+            }
+            drain_all_writes(asio::error::operation_aborted);
+        });
+
         m_work_guard.reset();
         m_ctx.stop();
         if (m_thread.joinable()) m_thread.join();
@@ -184,10 +211,6 @@ public:
 
         m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(callback)});
 
-        // Track pending items with an atomic counter instead of calling
-        // peek() from the producer thread.  peek() writes consumer-owned
-        // state (localTail) and must only be called from the consumer.
-        // Signal the consumer only on the 0→1 transition.
         if (m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
         {
             asio::post(m_ctx, [this]
@@ -214,13 +237,12 @@ public:
                                   {
                                       request->callback(ec, bytes_transferred);
                                   }
-                                  if (request->signal_sem) request->signal_sem->release();
+                                  if (request->sync_state)
+                                  {
+                                      request->sync_state->sem.release();
+                                  }
                                   m_write_queue.pop();
 
-                                  // m_write_count includes the just-completed
-                                  // in-flight item.  After decrement, a value
-                                  // > 1 means at least one more item is queued
-                                  // and the consumer should keep running.
                                   if (m_write_count.fetch_sub(1, std::memory_order_acq_rel) > 1)
                                   {
                                       start_write_loop();
@@ -228,28 +250,11 @@ public:
                               }
                               else if (ec == asio::error::interrupted)
                               {
-                                  // EINTR is transient: keep the request at the
-                                  // head of the queue and retry without dropping
-                                  // data or triggering a disconnect.
                                   start_write_loop();
                               }
                               else
                               {
-                                  // Port is broken: fail the current request and every
-                                  // pending one so no caller blocks forever on its
-                                  // semaphore/res. The failed item is also popped here,
-                                  // otherwise it would stay at the head and poison the
-                                  // queue (subsequent writes would never start).
-                                  while (auto* req = m_write_queue.peek())
-                                  {
-                                      if (req->callback) req->callback(ec, 0);
-                                      if (req->signal_sem) req->signal_sem->release();
-                                      if (req->res) *req->res = tl::make_unexpected(ec);
-                                      m_write_queue.pop();
-                                      // Each drained item must be accounted for so the
-                                      // counter stays in sync with the actual queue.
-                                      m_write_count.fetch_sub(1, std::memory_order_acq_rel);
-                                  }
+                                  drain_all_writes(ec);
                                   handle_disconnection(ec);
                               }
                           }
@@ -322,17 +327,12 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_impl->m_pool_resource);
     std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
 
-    std::binary_semaphore sem{0};
-    tl::expected<void, std::error_code> res{};
+    auto state = std::make_shared<Impl::SyncWriteState>();
 
     m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
-        std::move(temp_buf), {}, &sem, &res
+        std::move(temp_buf), {}, state
     });
 
-    // Track pending items with an atomic counter instead of calling
-    // peek() from the producer thread.  peek() writes consumer-owned
-    // state (localTail) and must only be called from the consumer.
-    // Signal the consumer only on the 0→1 transition.
     if (m_impl->m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
     {
         asio::post(m_impl->m_ctx, [this]
@@ -341,9 +341,9 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
         });
     }
 
-    sem.acquire();
+    state->sem.acquire();
 
-    return res;
+    return state->result;
 }
 
 void Serial::async_write(const std::span<const uint8_t> data, WriteCallback callback)
