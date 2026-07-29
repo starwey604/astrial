@@ -50,7 +50,7 @@ public:
     bool m_read_started{false};
     bool m_write_in_flight{false};
     bool m_auto_reconnect{true};
-    std::chrono::milliseconds m_reconnect_interval{std::chrono::seconds(3)};
+    std::chrono::milliseconds m_reconnect_interval{std::chrono::seconds(2)};
     std::atomic<SerialState> m_state{SerialState::Disconnected};
     std::atomic<bool> m_is_closed_by_user{false};
 
