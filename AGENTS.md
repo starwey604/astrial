@@ -16,11 +16,12 @@ cmake --build build
 - `-DASTRIAL_IO_URING=OFF` to skip io_uring detection. Auto-detected on Linux (kernel >= 5.15 + liburing), falls back to epoll.
 - Windows: links `setupapi` + `cfgfmgr32` automatically. LTO enabled by default.
 
-## No tests / no CI / no linter
+## Tests and CI
 
-- `test/` is empty.
+- CTest always runs a `Serial::list_ports()` smoke test.
+- Linux and macOS additionally run end-to-end serial I/O tests over a pseudo-terminal.
+- `.github/workflows/ci.yml` builds examples and runs tests on Linux, macOS, and Windows.
 - No formatter, linter, or typechecker config exists.
-- No CI workflows.
 
 ## Architecture
 
