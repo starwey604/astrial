@@ -20,6 +20,7 @@
 #include <string>
 #include <system_error>
 #include <termios.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
