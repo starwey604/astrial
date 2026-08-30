@@ -1,0 +1,6 @@
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(astrial_virtual_serial_tests virtual_serial.cpp)
+    target_link_libraries(astrial_virtual_serial_tests PRIVATE astrial util)
+    add_test(NAME astrial_virtual_serial COMMAND astrial_virtual_serial_tests)
+    set_tests_properties(astrial_virtual_serial PROPERTIES TIMEOUT 15)
+endif ()

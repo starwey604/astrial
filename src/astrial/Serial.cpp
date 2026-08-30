@@ -34,19 +34,36 @@ public:
     struct AsyncWriteReq
     {
         std::pmr::vector<uint8_t> buffer;
+        const uint8_t* borrowed_data{};
+        std::size_t borrowed_size{};
         WriteCallback callback;
         std::shared_ptr<SyncWriteState> sync_state;
+
+        [[nodiscard]] const uint8_t* data() const
+        {
+            return borrowed_data != nullptr ? borrowed_data : buffer.data();
+        }
+
+        [[nodiscard]] std::size_t size() const
+        {
+            return borrowed_data != nullptr ? borrowed_size : buffer.size();
+        }
     };
 
     moodycamel::ReaderWriterQueue<AsyncWriteReq, ASTRIAL_WRITE_BUFFER_LENGTH> m_write_queue;
     std::atomic<size_t> m_write_count{0};
-    std::pmr::unsynchronized_pool_resource m_pool_resource;
+    std::pmr::synchronized_pool_resource m_pool_resource;
 
     std::function<void(std::span<const uint8_t>)> m_data_callback;
+    ReadBufferProvider m_read_buffer_provider;
+    ReadCallback m_read_callback;
     std::function<void(const asio::error_code& code)> m_disconnect_callback;
     std::function<void()> m_reconnect_callback;
 
+    enum class ReadMode { None, Buffered, Borrowed };
+    ReadMode m_read_mode{ReadMode::None};
     bool m_read_started{false};
+    bool m_read_paused{false};
     bool m_write_in_flight{false};
     bool m_auto_reconnect{true};
     std::chrono::milliseconds m_reconnect_interval{std::chrono::seconds(2)};
@@ -76,24 +93,48 @@ public:
         }
     }
 
-    void close()
+    void close_on_context()
     {
-        m_is_closed_by_user.store(true, std::memory_order_release);
         m_reconnect_timer.cancel();
 
-        asio::post(m_ctx, [this]
+        if (m_port.is_open())
         {
-            if (m_port.is_open())
-            {
-                asio::error_code ec;
-                m_port.close(ec);
-            }
+            asio::error_code ec;
+            m_port.cancel(ec);
+            m_port.close(ec);
+        }
+
+        if (!m_write_in_flight)
+        {
             drain_all_writes(asio::error::operation_aborted);
-        });
+        }
+    }
+
+    void close()
+    {
+        const bool first_close = !m_is_closed_by_user.exchange(true, std::memory_order_acq_rel);
+
+        if (first_close)
+        {
+            if (m_thread.joinable() && m_thread.get_id() == std::this_thread::get_id())
+            {
+                close_on_context();
+            }
+            else if (m_thread.joinable())
+            {
+                asio::post(m_ctx, [this] { close_on_context(); });
+            }
+            else
+            {
+                close_on_context();
+            }
+        }
 
         m_work_guard.reset();
-        m_ctx.stop();
-        if (m_thread.joinable()) m_thread.join();
+        if (m_thread.joinable() && m_thread.get_id() != std::this_thread::get_id())
+        {
+            m_thread.join();
+        }
 
         m_state.store(SerialState::Disconnected, std::memory_order_release);
     }
@@ -166,7 +207,46 @@ public:
 
     void start_read_loop()
     {
-        if (m_read_started) return;
+        if (m_read_started || !m_port.is_open()) return;
+
+        if (m_read_mode == ReadMode::Borrowed)
+        {
+            if (!m_read_buffer_provider || !m_read_callback) return;
+
+            auto buffer = m_read_buffer_provider();
+            if (buffer.empty())
+            {
+                m_read_paused = true;
+                return;
+            }
+
+            m_read_paused = false;
+            m_read_started = true;
+            auto completion = m_read_callback;
+            m_port.async_read_some(asio::buffer(buffer.data(), buffer.size()),
+                                   [this, completion = std::move(completion)](
+                                       const asio::error_code& ec, std::size_t bytes)
+                                   {
+                                       m_read_started = false;
+                                       completion(ec, bytes);
+
+                                       if (!ec || ec == asio::error::interrupted)
+                                       {
+                                           start_read_loop();
+                                           return;
+                                       }
+
+                                       if (ec == asio::error::operation_aborted &&
+                                           m_is_closed_by_user.load(std::memory_order_acquire))
+                                       {
+                                           return;
+                                       }
+                                       handle_disconnection(ec);
+                                   });
+            return;
+        }
+
+        if (m_read_mode != ReadMode::Buffered || !m_data_callback) return;
         m_read_started = true;
 
         struct Reader
@@ -175,17 +255,18 @@ public:
 
             void operator()(const asio::error_code& ec, std::size_t bytes)
             {
+                impl.m_read_started = false;
                 if (!ec)
                 {
                     if (bytes > 0 && impl.m_data_callback)
                     {
                         impl.m_data_callback(std::span<const uint8_t>(impl.m_rx_buffer.data(), bytes));
                     }
-                    impl.m_port.async_read_some(asio::buffer(impl.m_rx_buffer), *this);
+                    impl.start_read_loop();
                 }
                 else if (ec == asio::error::interrupted)
                 {
-                    impl.m_port.async_read_some(asio::buffer(impl.m_rx_buffer), *this);
+                    impl.start_read_loop();
                 }
                 else
                 {
@@ -194,7 +275,6 @@ public:
                     {
                         return;
                     }
-                    impl.m_read_started = false;
                     impl.handle_disconnection(ec);
                 }
             }
@@ -207,7 +287,24 @@ public:
         const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
         std::pmr::vector<uint8_t> temp_buf(data.begin(), data.end(), alloc);
 
-        m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), std::move(callback)});
+        m_write_queue.enqueue(AsyncWriteReq{std::move(temp_buf), nullptr, 0,
+                                            std::move(callback), {}});
+
+        if (m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
+        {
+            asio::post(m_ctx, [this]
+            {
+                start_write_loop();
+            });
+        }
+    }
+
+    void enqueue_borrowed_write(const std::span<const uint8_t> data, WriteCallback callback)
+    {
+        const std::pmr::polymorphic_allocator<uint8_t> alloc(&m_pool_resource);
+        std::pmr::vector<uint8_t> empty_buf(alloc);
+        m_write_queue.enqueue(AsyncWriteReq{std::move(empty_buf), data.data(), data.size(),
+                                            std::move(callback), {}});
 
         if (m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
         {
@@ -225,7 +322,7 @@ public:
         if (request == nullptr) return; // empty
 
         m_write_in_flight = true;
-        asio::async_write(m_port, asio::buffer(request->buffer.data(), request->buffer.size()),
+        asio::async_write(m_port, asio::buffer(request->data(), request->size()),
                           [this, request](const asio::error_code& ec, std::size_t bytes_transferred)
                           {
                               m_write_in_flight = false;
@@ -290,7 +387,7 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     });
 
     impl.m_state.store(SerialState::Connected, std::memory_order_release);
-    return std::move(serial);
+    return serial;
 }
 
 tl::expected<Serial, std::error_code> SerialBuilder::open(const SerialInfo& info) const
@@ -312,8 +409,41 @@ void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 {
     asio::post(m_impl->m_ctx, [this, cb = std::move(callback)]() mutable
     {
+        if (m_impl->m_read_mode == Impl::ReadMode::Borrowed) return;
+        m_impl->m_read_mode = Impl::ReadMode::Buffered;
         m_impl->m_data_callback = std::move(cb);
         m_impl->start_read_loop();
+    });
+}
+
+void Serial::on_data_borrowed(ReadBufferProvider provider, ReadCallback callback)
+{
+    asio::post(m_impl->m_ctx,
+               [this, provider = std::move(provider), callback = std::move(callback)]() mutable
+               {
+                   if (m_impl->m_read_mode == Impl::ReadMode::Buffered)
+                   {
+                       if (callback)
+                       {
+                           callback(make_error_code(SerialError::InvalidArgument), 0);
+                       }
+                       return;
+                   }
+                   m_impl->m_read_mode = Impl::ReadMode::Borrowed;
+                   m_impl->m_read_buffer_provider = std::move(provider);
+                   m_impl->m_read_callback = std::move(callback);
+                   m_impl->start_read_loop();
+               });
+}
+
+void Serial::resume_read()
+{
+    asio::post(m_impl->m_ctx, [this]
+    {
+        if (m_impl->m_read_mode == Impl::ReadMode::Borrowed && m_impl->m_read_paused)
+        {
+            m_impl->start_read_loop();
+        }
     });
 }
 
@@ -328,7 +458,7 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     auto future = state->promise.get_future();
 
     m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
-        std::move(temp_buf), {}, state
+        std::move(temp_buf), nullptr, 0, {}, state
     });
 
     if (m_impl->m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
@@ -353,7 +483,7 @@ tl::expected<void, std::error_code> Serial::write(const std::span<const uint8_t>
     auto future = state->promise.get_future();
 
     m_impl->m_write_queue.enqueue(Impl::AsyncWriteReq{
-        std::move(temp_buf), {}, state
+        std::move(temp_buf), nullptr, 0, {}, state
     });
 
     if (m_impl->m_write_count.fetch_add(1, std::memory_order_acq_rel) == 0)
@@ -382,6 +512,19 @@ void Serial::async_write(const std::span<const uint8_t> data, WriteCallback call
         return;
     }
     m_impl->enqueue_write(data, std::move(callback));
+}
+
+void Serial::async_write_borrowed(const std::span<const uint8_t> data, WriteCallback callback)
+{
+    if (!m_impl->m_port.is_open())
+    {
+        if (callback)
+        {
+            callback(SerialError::DeviceDisconnected, 0);
+        }
+        return;
+    }
+    m_impl->enqueue_borrowed_write(data, std::move(callback));
 }
 
 void Serial::close()

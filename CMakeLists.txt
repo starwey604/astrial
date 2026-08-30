@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(astrial)
 
+include(CTest)
+
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
@@ -46,4 +48,8 @@ target_compile_definitions(astrial PUBLIC ASTRIAL_WRITE_BUFFER_LENGTH=${ASTRIAL_
 
 if (BUILD_EXAMPLE)
     add_subdirectory(examples)
+endif ()
+
+if (BUILD_TESTING)
+    add_subdirectory(tests)
 endif ()
