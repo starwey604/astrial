@@ -8,7 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
-#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -243,16 +242,14 @@ public:
             return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
         }
 
+        std::lock_guard lifecycle_lock(m_read_lifecycle_mutex);
+        if (m_reads_enabled.load())
         {
-            std::lock_guard lock(m_mutex);
-            if (m_reads_enabled)
-            {
-                return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
-            }
-            m_read_provider = std::move(provider);
-            m_read_callback = std::move(callback);
-            m_reads_enabled = true;
+            return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
         }
+        m_read_provider = std::move(provider);
+        m_read_callback = std::move(callback);
+        m_reads_enabled.store(true);
         wake_event_thread();
         return {};
     }
@@ -265,11 +262,10 @@ public:
             return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
         }
 
-        {
-            std::lock_guard lock(m_mutex);
-            if (!m_reads_enabled) return {};
-            m_reads_enabled = false;
-        }
+        std::lock_guard lifecycle_lock(m_read_lifecycle_mutex);
+        if (!m_reads_enabled.exchange(false)) return {};
+
+        while (m_arming_reads.load()) m_arming_reads.wait(true);
         for (const auto& slot : m_read_slots)
         {
             if (slot->submitted.load(std::memory_order_acquire))
@@ -282,16 +278,13 @@ public:
         }
         wake_event_thread();
 
-        std::unique_lock lock(m_mutex);
-        m_transfer_condition.wait(lock, [this]
+        for (const auto& slot : m_read_slots)
         {
-            return std::none_of(m_read_slots.begin(), m_read_slots.end(),
-                                [](const auto& slot)
-                                {
-                                    return slot->submitted.load(
-                                        std::memory_order_acquire);
-                                });
-        });
+            while (slot->submitted.load(std::memory_order_acquire))
+            {
+                slot->submitted.wait(true, std::memory_order_acquire);
+            }
+        }
         m_read_provider = {};
         m_read_callback = {};
         return {};
@@ -309,15 +302,17 @@ public:
         {
             return tl::make_unexpected(make_error_code(UsbError::InvalidArgument));
         }
-        if (m_state.load(std::memory_order_acquire) != UsbState::Connected)
-        {
-            return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
-        }
-
-        std::lock_guard lock(m_mutex);
-        if (m_write_submitted.load(std::memory_order_acquire))
+        bool inactive = false;
+        if (!m_write_active.compare_exchange_strong(inactive, true,
+                                                    std::memory_order_acq_rel))
         {
             return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
+        }
+        if (m_stopping.load(std::memory_order_acquire) ||
+            m_state.load(std::memory_order_acquire) != UsbState::Connected)
+        {
+            m_write_active.store(false, std::memory_order_release);
+            return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
         }
 
         m_write_callback = std::move(callback);
@@ -336,10 +331,16 @@ public:
         {
             m_write_submitted.store(false, std::memory_order_release);
             m_write_callback = {};
+            m_write_active.store(false, std::memory_order_release);
             m_errors.fetch_add(1, std::memory_order_relaxed);
             return tl::make_unexpected(from_libusb_error(result));
         }
         m_writes_submitted.fetch_add(1, std::memory_order_relaxed);
+        if (m_stopping.load(std::memory_order_acquire) &&
+            libusb_cancel_transfer(m_write_transfer) == LIBUSB_SUCCESS)
+        {
+            m_cancellations.fetch_add(1, std::memory_order_relaxed);
+        }
         return {};
     }
 
@@ -530,7 +531,7 @@ private:
 
     bool transfers_active() const
     {
-        if (m_write_submitted.load(std::memory_order_acquire)) return true;
+        if (m_write_active.load(std::memory_order_acquire)) return true;
         return std::any_of(m_read_slots.begin(), m_read_slots.end(), [](const auto& slot)
         {
             return slot->submitted.load(std::memory_order_acquire);
@@ -575,18 +576,19 @@ private:
 
     void arm_reads()
     {
-        ReadBufferProvider provider;
+        m_arming_reads.store(true);
+        if (!m_reads_enabled.load())
         {
-            std::lock_guard lock(m_mutex);
-            if (!m_reads_enabled) return;
-            provider = m_read_provider;
+            m_arming_reads.store(false);
+            m_arming_reads.notify_all();
+            return;
         }
 
         for (const auto& slot : m_read_slots)
         {
             if (slot->submitted.load(std::memory_order_acquire)) continue;
 
-            slot->buffer = provider();
+            slot->buffer = m_read_provider();
             if (slot->buffer.bytes.empty()) continue;
             if (slot->buffer.bytes.size() > static_cast<std::size_t>(INT_MAX))
             {
@@ -609,7 +611,7 @@ private:
                 if (result == LIBUSB_ERROR_NO_DEVICE)
                 {
                     mark_disconnected(UsbError::DeviceDisconnected);
-                    return;
+                    break;
                 }
             }
             else
@@ -617,6 +619,8 @@ private:
                 m_reads_submitted.fetch_add(1, std::memory_order_relaxed);
             }
         }
+        m_arming_reads.store(false);
+        m_arming_reads.notify_all();
     }
 
     static void LIBUSB_CALL read_completed(libusb_transfer* transfer)
@@ -642,7 +646,7 @@ private:
             self.m_errors.fetch_add(1, std::memory_order_relaxed);
         }
         slot.submitted.store(false, std::memory_order_release);
-        self.m_transfer_condition.notify_all();
+        slot.submitted.notify_all();
         if (error == make_error_code(UsbError::DeviceDisconnected))
         {
             self.mark_disconnected(error);
@@ -651,13 +655,8 @@ private:
 
     void deliver_read(ReadSlot& slot, const std::error_code& error, std::size_t size)
     {
-        ReadCallback callback;
-        {
-            std::lock_guard lock(m_mutex);
-            callback = m_read_callback;
-        }
         auto buffer = std::exchange(slot.buffer, {});
-        if (callback) callback(error, buffer, size);
+        if (m_read_callback) m_read_callback(error, buffer, size);
     }
 
     static void LIBUSB_CALL write_completed(libusb_transfer* transfer)
@@ -679,17 +678,17 @@ private:
             error = from_libusb_error(result);
         }
 
-        WriteCallback callback;
-        std::size_t transferred{};
+        WriteCallback callback = std::move(m_write_callback);
+        const std::size_t transferred = !error ? m_write_size : 0;
+        m_write_size = 0;
+        m_write_needs_zlp = false;
+        m_write_zlp_phase = false;
+        m_write_submitted.store(false, std::memory_order_release);
+        if (error == make_error_code(UsbError::DeviceDisconnected))
         {
-            std::lock_guard lock(m_mutex);
-            callback = std::move(m_write_callback);
-            transferred = !error ? m_write_size : 0;
-            m_write_size = 0;
-            m_write_needs_zlp = false;
-            m_write_zlp_phase = false;
-            m_write_submitted.store(false, std::memory_order_release);
+            mark_disconnected(error);
         }
+        m_write_active.store(false, std::memory_order_release);
         if (callback) callback(error, transferred);
         m_writes_completed.fetch_add(1, std::memory_order_relaxed);
         if (!error)
@@ -699,10 +698,6 @@ private:
         else if (error != make_error_code(UsbError::TransferCancelled))
         {
             m_errors.fetch_add(1, std::memory_order_relaxed);
-        }
-        if (error == make_error_code(UsbError::DeviceDisconnected))
-        {
-            mark_disconnected(error);
         }
     }
 
@@ -772,13 +767,15 @@ private:
     std::thread m_event_thread;
 
     mutable std::mutex m_mutex;
-    std::condition_variable m_transfer_condition;
+    std::mutex m_read_lifecycle_mutex;
     ReadBufferProvider m_read_provider;
     ReadCallback m_read_callback;
     WriteCallback m_write_callback;
     std::function<void(const std::error_code&)> m_disconnect_callback;
     std::function<void()> m_reconnect_callback;
-    bool m_reads_enabled{};
+    std::atomic<bool> m_reads_enabled{false};
+    std::atomic<bool> m_arming_reads{false};
+    std::atomic<bool> m_write_active{false};
     std::atomic<bool> m_write_submitted{false};
     std::size_t m_write_size{};
     bool m_write_needs_zlp{};

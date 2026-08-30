@@ -81,7 +81,9 @@ Two IN transfers are queued by default. Their payloads land directly in the
 buffers returned by `acquire_rx_buffer`; returning an empty buffer applies
 backpressure until `resume_reads()` is called. A token may identify the owner
 of each borrowed span. Providers and completion callbacks execute on Astrial's
-libusb event thread.
+libusb event thread. The read provider/callback dispatch and single in-flight
+write gate do not take a mutex on the transfer hot path; lifecycle operations
+still synchronize `start_reads()`, `stop_reads()`, reconnect, and close.
 
 `async_write_borrowed()` similarly keeps the caller's memory in place until
 completion. Astrial sends an explicit zero-length packet when a non-empty OUT
