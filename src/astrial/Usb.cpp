@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -91,11 +92,76 @@ std::string read_string(libusb_device_handle* handle, uint8_t index)
 
 bool valid_config(const UsbBulkConfig& config)
 {
-    return config.vendor_id != 0 && config.product_id != 0 &&
-           (config.endpoint_in & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN &&
-           (config.endpoint_out & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT &&
+    return config.device.vendor_id != 0 && config.device.product_id != 0 &&
+           (config.bulk_interface.endpoint_in & LIBUSB_ENDPOINT_DIR_MASK) ==
+               LIBUSB_ENDPOINT_IN &&
+           (config.bulk_interface.endpoint_out & LIBUSB_ENDPOINT_DIR_MASK) ==
+               LIBUSB_ENDPOINT_OUT &&
            config.read_queue_depth > 0 && config.read_queue_depth <= 32 &&
            config.reconnect_interval.count() >= 0;
+}
+
+bool matches_port_path(libusb_device* device, const std::vector<uint8_t>& expected)
+{
+    if (expected.empty()) return true;
+    uint8_t actual[8]{};
+    const int count = libusb_get_port_numbers(device, actual,
+                                               static_cast<int>(std::size(actual)));
+    return count >= 0 && expected.size() == static_cast<std::size_t>(count) &&
+           std::equal(expected.begin(), expected.end(), actual);
+}
+
+tl::expected<UsbBulkEndpointInfo, std::error_code>
+inspect_bulk_interface(libusb_device* device, const UsbBulkInterface& wanted)
+{
+    libusb_config_descriptor* config{};
+    const int result = libusb_get_active_config_descriptor(device, &config);
+    if (result != LIBUSB_SUCCESS)
+    {
+        return tl::make_unexpected(from_libusb_error(result));
+    }
+
+    UsbBulkEndpointInfo info{};
+    bool interface_found = false;
+    for (uint8_t index = 0; index < config->bNumInterfaces; ++index)
+    {
+        const auto& interface = config->interface[index];
+        for (int alternate = 0; alternate < interface.num_altsetting; ++alternate)
+        {
+            const auto& descriptor = interface.altsetting[alternate];
+            if (descriptor.bInterfaceNumber != wanted.interface_number ||
+                descriptor.bAlternateSetting != 0)
+            {
+                continue;
+            }
+            interface_found = true;
+            for (uint8_t endpoint = 0; endpoint < descriptor.bNumEndpoints; ++endpoint)
+            {
+                const auto& ep = descriptor.endpoint[endpoint];
+                if ((ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
+                    LIBUSB_TRANSFER_TYPE_BULK)
+                {
+                    continue;
+                }
+                if (ep.bEndpointAddress == wanted.endpoint_in)
+                {
+                    info.maximum_packet_size_in = ep.wMaxPacketSize & 0x07ffU;
+                }
+                else if (ep.bEndpointAddress == wanted.endpoint_out)
+                {
+                    info.maximum_packet_size_out = ep.wMaxPacketSize & 0x07ffU;
+                }
+            }
+        }
+    }
+    libusb_free_config_descriptor(config);
+
+    if (!interface_found || info.maximum_packet_size_in == 0 ||
+        info.maximum_packet_size_out == 0)
+    {
+        return tl::make_unexpected(make_error_code(UsbError::InvalidArgument));
+    }
+    return info;
 }
 } // namespace
 
@@ -191,6 +257,46 @@ public:
         return {};
     }
 
+    tl::expected<void, std::error_code> stop_reads()
+    {
+        if (m_event_thread.joinable() &&
+            m_event_thread.get_id() == std::this_thread::get_id())
+        {
+            return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
+        }
+
+        {
+            std::lock_guard lock(m_mutex);
+            if (!m_reads_enabled) return {};
+            m_reads_enabled = false;
+        }
+        for (const auto& slot : m_read_slots)
+        {
+            if (slot->submitted.load(std::memory_order_acquire))
+            {
+                if (libusb_cancel_transfer(slot->transfer) == LIBUSB_SUCCESS)
+                {
+                    m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        wake_event_thread();
+
+        std::unique_lock lock(m_mutex);
+        m_transfer_condition.wait(lock, [this]
+        {
+            return std::none_of(m_read_slots.begin(), m_read_slots.end(),
+                                [](const auto& slot)
+                                {
+                                    return slot->submitted.load(
+                                        std::memory_order_acquire);
+                                });
+        });
+        m_read_provider = {};
+        m_read_callback = {};
+        return {};
+    }
+
     void resume_reads()
     {
         wake_event_thread();
@@ -216,10 +322,12 @@ public:
 
         m_write_callback = std::move(callback);
         m_write_size = data.size();
-        m_write_needs_zlp = !data.empty() && m_out_packet_size > 0 &&
-                            data.size() % m_out_packet_size == 0;
+        m_write_needs_zlp = !data.empty() &&
+                            m_endpoint_info.maximum_packet_size_out > 0 &&
+                            data.size() % m_endpoint_info.maximum_packet_size_out == 0;
         m_write_zlp_phase = false;
-        libusb_fill_bulk_transfer(m_write_transfer, m_handle, m_config.endpoint_out,
+        libusb_fill_bulk_transfer(m_write_transfer, m_handle,
+                                  m_config.bulk_interface.endpoint_out,
                                   const_cast<unsigned char*>(data.data()),
                                   static_cast<int>(data.size()), write_completed, this, 0);
         m_write_submitted.store(true, std::memory_order_release);
@@ -228,8 +336,10 @@ public:
         {
             m_write_submitted.store(false, std::memory_order_release);
             m_write_callback = {};
+            m_errors.fetch_add(1, std::memory_order_relaxed);
             return tl::make_unexpected(from_libusb_error(result));
         }
+        m_writes_submitted.fetch_add(1, std::memory_order_relaxed);
         return {};
     }
 
@@ -250,6 +360,27 @@ public:
         return m_state.load(std::memory_order_acquire);
     }
 
+    [[nodiscard]] UsbBulkEndpointInfo endpoint_info() const noexcept
+    {
+        std::lock_guard lock(m_mutex);
+        return m_endpoint_info;
+    }
+
+    [[nodiscard]] UsbBulkStats stats() const noexcept
+    {
+        return {
+            .reads_submitted = m_reads_submitted.load(std::memory_order_relaxed),
+            .reads_completed = m_reads_completed.load(std::memory_order_relaxed),
+            .bytes_received = m_bytes_received.load(std::memory_order_relaxed),
+            .writes_submitted = m_writes_submitted.load(std::memory_order_relaxed),
+            .writes_completed = m_writes_completed.load(std::memory_order_relaxed),
+            .bytes_transmitted = m_bytes_transmitted.load(std::memory_order_relaxed),
+            .cancellations = m_cancellations.load(std::memory_order_relaxed),
+            .errors = m_errors.load(std::memory_order_relaxed),
+            .reconnects = m_reconnects.load(std::memory_order_relaxed),
+        };
+    }
+
     void close()
     {
         const bool first_close = !m_stopping.exchange(true, std::memory_order_acq_rel);
@@ -260,12 +391,18 @@ public:
             {
                 if (slot->submitted.load(std::memory_order_acquire))
                 {
-                    (void)libusb_cancel_transfer(slot->transfer);
+                    if (libusb_cancel_transfer(slot->transfer) == LIBUSB_SUCCESS)
+                    {
+                        m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
             if (m_write_submitted.load(std::memory_order_acquire))
             {
-                (void)libusb_cancel_transfer(m_write_transfer);
+                if (libusb_cancel_transfer(m_write_transfer) == LIBUSB_SUCCESS)
+                {
+                    m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             wake_event_thread();
         }
@@ -283,7 +420,6 @@ public:
         }
 
         if (m_cleanup_done.exchange(true, std::memory_order_acq_rel)) return;
-
         for (const auto& slot : m_read_slots)
         {
             libusb_free_transfer(slot->transfer);
@@ -317,8 +453,9 @@ private:
         {
             libusb_device_descriptor descriptor{};
             if (libusb_get_device_descriptor(devices[index], &descriptor) != LIBUSB_SUCCESS ||
-                descriptor.idVendor != m_config.vendor_id ||
-                descriptor.idProduct != m_config.product_id)
+                descriptor.idVendor != m_config.device.vendor_id ||
+                descriptor.idProduct != m_config.device.product_id ||
+                !matches_port_path(devices[index], m_config.device.port_path))
             {
                 continue;
             }
@@ -331,9 +468,19 @@ private:
                 continue;
             }
 
-            if (!m_config.serial_number.empty() &&
-                read_string(candidate, descriptor.iSerialNumber) != m_config.serial_number)
+            if (!m_config.device.serial_number.empty() &&
+                read_string(candidate, descriptor.iSerialNumber) !=
+                    m_config.device.serial_number)
             {
+                libusb_close(candidate);
+                continue;
+            }
+
+            auto endpoint_info =
+                inspect_bulk_interface(devices[index], m_config.bulk_interface);
+            if (!endpoint_info)
+            {
+                last_error = endpoint_info.error();
                 libusb_close(candidate);
                 continue;
             }
@@ -350,8 +497,8 @@ private:
                 }
             }
 
-            const int claim_result = libusb_claim_interface(candidate,
-                                                             m_config.interface_number);
+            const int claim_result = libusb_claim_interface(
+                candidate, m_config.bulk_interface.interface_number);
             if (claim_result != LIBUSB_SUCCESS)
             {
                 last_error = from_libusb_error(claim_result);
@@ -359,20 +506,11 @@ private:
                 continue;
             }
 
-            const int in_packet_size = libusb_get_max_packet_size(
-                devices[index], m_config.endpoint_in);
-            const int out_packet_size = libusb_get_max_packet_size(
-                devices[index], m_config.endpoint_out);
-            if (in_packet_size <= 0 || out_packet_size <= 0)
-            {
-                (void)libusb_release_interface(candidate, m_config.interface_number);
-                libusb_close(candidate);
-                last_error = UsbError::InvalidArgument;
-                continue;
-            }
-
             m_handle = candidate;
-            m_out_packet_size = static_cast<std::size_t>(out_packet_size);
+            {
+                std::lock_guard lock(m_mutex);
+                m_endpoint_info = endpoint_info.value();
+            }
             libusb_free_device_list(devices, 1);
             return {};
         }
@@ -384,7 +522,8 @@ private:
     void close_handle()
     {
         if (m_handle == nullptr) return;
-        (void)libusb_release_interface(m_handle, m_config.interface_number);
+        (void)libusb_release_interface(m_handle,
+                                       m_config.bulk_interface.interface_number);
         libusb_close(m_handle);
         m_handle = nullptr;
     }
@@ -455,7 +594,8 @@ private:
                 continue;
             }
 
-            libusb_fill_bulk_transfer(slot->transfer, m_handle, m_config.endpoint_in,
+            libusb_fill_bulk_transfer(slot->transfer, m_handle,
+                                      m_config.bulk_interface.endpoint_in,
                                       slot->buffer.bytes.data(),
                                       static_cast<int>(slot->buffer.bytes.size()),
                                       read_completed, slot.get(), 0);
@@ -464,12 +604,17 @@ private:
             if (result != LIBUSB_SUCCESS)
             {
                 slot->submitted.store(false, std::memory_order_release);
+                m_errors.fetch_add(1, std::memory_order_relaxed);
                 deliver_read(*slot, from_libusb_error(result), 0);
                 if (result == LIBUSB_ERROR_NO_DEVICE)
                 {
                     mark_disconnected(UsbError::DeviceDisconnected);
                     return;
                 }
+            }
+            else
+            {
+                m_reads_submitted.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -478,12 +623,26 @@ private:
     {
         auto& slot = *static_cast<ReadSlot*>(transfer->user_data);
         Impl& self = *slot.owner;
-        slot.submitted.store(false, std::memory_order_release);
         const auto error = from_transfer_status(transfer->status);
         self.deliver_read(slot, error,
                           transfer->actual_length > 0
                               ? static_cast<std::size_t>(transfer->actual_length)
                               : 0);
+        self.m_reads_completed.fetch_add(1, std::memory_order_relaxed);
+        if (!error)
+        {
+            self.m_bytes_received.fetch_add(
+                transfer->actual_length > 0
+                    ? static_cast<std::size_t>(transfer->actual_length)
+                    : 0,
+                std::memory_order_relaxed);
+        }
+        else if (error != make_error_code(UsbError::TransferCancelled))
+        {
+            self.m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        slot.submitted.store(false, std::memory_order_release);
+        self.m_transfer_condition.notify_all();
         if (error == make_error_code(UsbError::DeviceDisconnected))
         {
             self.mark_disconnected(error);
@@ -512,7 +671,8 @@ private:
         if (!error && m_write_needs_zlp && !m_write_zlp_phase)
         {
             m_write_zlp_phase = true;
-            libusb_fill_bulk_transfer(m_write_transfer, m_handle, m_config.endpoint_out,
+            libusb_fill_bulk_transfer(m_write_transfer, m_handle,
+                                      m_config.bulk_interface.endpoint_out,
                                       nullptr, 0, write_completed, this, 0);
             const int result = libusb_submit_transfer(m_write_transfer);
             if (result == LIBUSB_SUCCESS) return;
@@ -531,6 +691,15 @@ private:
             m_write_submitted.store(false, std::memory_order_release);
         }
         if (callback) callback(error, transferred);
+        m_writes_completed.fetch_add(1, std::memory_order_relaxed);
+        if (!error)
+        {
+            m_bytes_transmitted.fetch_add(transferred, std::memory_order_relaxed);
+        }
+        else if (error != make_error_code(UsbError::TransferCancelled))
+        {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
         if (error == make_error_code(UsbError::DeviceDisconnected))
         {
             mark_disconnected(error);
@@ -551,12 +720,18 @@ private:
         {
             if (slot->submitted.load(std::memory_order_acquire))
             {
-                (void)libusb_cancel_transfer(slot->transfer);
+                if (libusb_cancel_transfer(slot->transfer) == LIBUSB_SUCCESS)
+                {
+                    m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
         if (m_write_submitted.load(std::memory_order_acquire))
         {
-            (void)libusb_cancel_transfer(m_write_transfer);
+            if (libusb_cancel_transfer(m_write_transfer) == LIBUSB_SUCCESS)
+            {
+                m_cancellations.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         m_next_reconnect = std::chrono::steady_clock::now() + m_config.reconnect_interval;
 
@@ -579,6 +754,7 @@ private:
         }
 
         m_state.store(UsbState::Connected, std::memory_order_release);
+        m_reconnects.fetch_add(1, std::memory_order_relaxed);
         std::function<void()> callback;
         {
             std::lock_guard lock(m_mutex);
@@ -590,12 +766,13 @@ private:
     UsbBulkConfig m_config;
     libusb_context* m_context{};
     libusb_device_handle* m_handle{};
-    std::size_t m_out_packet_size{};
+    UsbBulkEndpointInfo m_endpoint_info{};
     std::vector<std::unique_ptr<ReadSlot>> m_read_slots;
     libusb_transfer* m_write_transfer{};
     std::thread m_event_thread;
 
     mutable std::mutex m_mutex;
+    std::condition_variable m_transfer_condition;
     ReadBufferProvider m_read_provider;
     ReadCallback m_read_callback;
     WriteCallback m_write_callback;
@@ -609,6 +786,15 @@ private:
     std::atomic<UsbState> m_state{UsbState::Disconnected};
     std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_cleanup_done{false};
+    std::atomic<uint64_t> m_reads_submitted{};
+    std::atomic<uint64_t> m_reads_completed{};
+    std::atomic<uint64_t> m_bytes_received{};
+    std::atomic<uint64_t> m_writes_submitted{};
+    std::atomic<uint64_t> m_writes_completed{};
+    std::atomic<uint64_t> m_bytes_transmitted{};
+    std::atomic<uint64_t> m_cancellations{};
+    std::atomic<uint64_t> m_errors{};
+    std::atomic<uint64_t> m_reconnects{};
     std::chrono::steady_clock::time_point m_next_reconnect{};
 };
 
@@ -678,6 +864,16 @@ tl::expected<UsbBulkDevice, std::error_code> UsbBulkDevice::open(const UsbBulkCo
     return UsbBulkDevice(std::move(implementation));
 }
 
+tl::expected<UsbBulkDevice, std::error_code>
+UsbBulkDevice::open(const UsbDeviceInfo& device, UsbBulkConfig config)
+{
+    config.device.vendor_id = device.vendor_id;
+    config.device.product_id = device.product_id;
+    config.device.serial_number = device.serial_number;
+    config.device.port_path = device.port_path;
+    return open(config);
+}
+
 UsbBulkDevice::UsbBulkDevice(std::unique_ptr<Impl> implementation)
     : m_impl(std::move(implementation))
 {
@@ -695,6 +891,15 @@ UsbBulkDevice::start_reads(ReadBufferProvider provider, ReadCallback callback)
         return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
     }
     return m_impl->start_reads(std::move(provider), std::move(callback));
+}
+
+tl::expected<void, std::error_code> UsbBulkDevice::stop_reads()
+{
+    if (!m_impl)
+    {
+        return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
+    }
+    return m_impl->stop_reads();
 }
 
 void UsbBulkDevice::resume_reads()
@@ -725,6 +930,16 @@ void UsbBulkDevice::on_reconnect(std::function<void()> callback)
 UsbState UsbBulkDevice::state() const noexcept
 {
     return m_impl ? m_impl->state() : UsbState::Closed;
+}
+
+UsbBulkEndpointInfo UsbBulkDevice::endpoint_info() const noexcept
+{
+    return m_impl ? m_impl->endpoint_info() : UsbBulkEndpointInfo{};
+}
+
+UsbBulkStats UsbBulkDevice::stats() const noexcept
+{
+    return m_impl ? m_impl->stats() : UsbBulkStats{};
 }
 
 void UsbBulkDevice::close()

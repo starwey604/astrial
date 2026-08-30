@@ -47,18 +47,48 @@ struct UsbDeviceInfo
     std::string serial_number;
 };
 
-struct UsbBulkConfig
+struct UsbDeviceSelector
 {
     uint16_t vendor_id{};
     uint16_t product_id{};
     std::string serial_number;
+    std::vector<uint8_t> port_path;
+};
+
+struct UsbBulkInterface
+{
     uint8_t interface_number{};
     uint8_t endpoint_in{0x81};
     uint8_t endpoint_out{0x01};
+};
+
+struct UsbBulkConfig
+{
+    UsbDeviceSelector device;
+    UsbBulkInterface bulk_interface;
     std::size_t read_queue_depth{2};
     bool auto_detach_kernel_driver{true};
     bool auto_reconnect{true};
     std::chrono::milliseconds reconnect_interval{500};
+};
+
+struct UsbBulkEndpointInfo
+{
+    uint16_t maximum_packet_size_in{};
+    uint16_t maximum_packet_size_out{};
+};
+
+struct UsbBulkStats
+{
+    uint64_t reads_submitted{};
+    uint64_t reads_completed{};
+    uint64_t bytes_received{};
+    uint64_t writes_submitted{};
+    uint64_t writes_completed{};
+    uint64_t bytes_transmitted{};
+    uint64_t cancellations{};
+    uint64_t errors{};
+    uint64_t reconnects{};
 };
 
 struct UsbBorrowedBuffer
@@ -79,6 +109,8 @@ public:
 
     static tl::expected<std::vector<UsbDeviceInfo>, std::error_code> list_devices();
     static tl::expected<UsbBulkDevice, std::error_code> open(const UsbBulkConfig& config);
+    static tl::expected<UsbBulkDevice, std::error_code>
+    open(const UsbDeviceInfo& device, UsbBulkConfig config);
 
     ~UsbBulkDevice();
     UsbBulkDevice(const UsbBulkDevice&) = delete;
@@ -88,6 +120,9 @@ public:
 
     tl::expected<void, std::error_code> start_reads(ReadBufferProvider provider,
                                                     ReadCallback callback);
+    // Stops new reads and synchronously returns every submitted borrowed
+    // buffer. Do not call from a USB callback.
+    tl::expected<void, std::error_code> stop_reads();
     // Wake the event thread after a provider previously returned an empty
     // buffer. Providers and callbacks run on that event thread.
     void resume_reads();
@@ -100,6 +135,8 @@ public:
     void on_disconnect(std::function<void(const std::error_code&)> callback);
     void on_reconnect(std::function<void()> callback);
     [[nodiscard]] UsbState state() const noexcept;
+    [[nodiscard]] UsbBulkEndpointInfo endpoint_info() const noexcept;
+    [[nodiscard]] UsbBulkStats stats() const noexcept;
     // May be called from a callback. The object itself must be destroyed from
     // another thread so its event thread can be joined safely.
     void close();

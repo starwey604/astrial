@@ -58,8 +58,8 @@ cmake --build build-usb
 
 ```cpp
 UsbBulkConfig config;
-config.vendor_id = 0x2fe3;
-config.product_id = 0x574c;
+config.device.vendor_id = 0x2fe3;
+config.device.product_id = 0x574c;
 
 auto device = UsbBulkDevice::open(config).value();
 device.start_reads(
@@ -69,6 +69,13 @@ device.start_reads(
         consume_and_release(buffer.token, length, error);
     });
 ```
+
+`UsbDeviceSelector` can additionally pin a device by serial number or physical
+USB port path. Astrial validates that the selected interface exposes the
+requested bulk endpoints before claiming it. `stop_reads()` synchronously
+returns all borrowed read buffers; `endpoint_info()` and `stats()` expose the
+negotiated packet sizes and transfer counters without adding callbacks to the
+data path.
 
 Two IN transfers are queued by default. Their payloads land directly in the
 buffers returned by `acquire_rx_buffer`; returning an empty buffer applies
