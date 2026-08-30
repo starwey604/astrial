@@ -39,6 +39,15 @@ if (WIN32)
     target_link_libraries(astrial PRIVATE setupapi cfgmgr32)
 endif ()
 
+if (APPLE)
+    find_library(ASTRIAL_IOKIT_FRAMEWORK IOKit REQUIRED)
+    find_library(ASTRIAL_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    target_link_libraries(astrial PRIVATE
+            ${ASTRIAL_IOKIT_FRAMEWORK}
+            ${ASTRIAL_COREFOUNDATION_FRAMEWORK}
+    )
+endif ()
+
 if (UNIX AND ASTRIAL_IO_URING)
     include(UseIoUring)
 endif ()

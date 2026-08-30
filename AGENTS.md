@@ -58,7 +58,9 @@ serial.write(cmd); // synchronous write
 ## Platform notes
 
 - Linux port enumeration reads `/sys/class/tty` and walks the USB device tree for VID/PID/manufacturer/serial.
-- macOS port enumeration uses the **same `/sys/class/tty` Linux code path** — will not work. Needs IOKit-based implementation.
+- macOS port enumeration uses IOKit's `IOSerialBSDClient` services and returns
+  callout paths. USB metadata is resolved by searching the parent registry
+  chain; non-USB ports fall back to their TTY device description.
 - Windows port enumeration uses SetupAPI (`setupapi.lib`).
 
 ## Source typo

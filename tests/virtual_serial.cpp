@@ -10,7 +10,11 @@
 #include <iostream>
 #include <mutex>
 #include <poll.h>
+#if defined(__APPLE__)
+#include <util.h>
+#else
 #include <pty.h>
+#endif
 #include <span>
 #include <stdexcept>
 #include <string>

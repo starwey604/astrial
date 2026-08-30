@@ -2,6 +2,14 @@
 
 一个基于 asio 的 跨平台 现代 C++ 串行通信库。支持设备信息获取等使用功能。
 
+## Platform discovery
+
+- Linux enumerates physical TTY devices through sysfs.
+- macOS enumerates `IOSerialBSDClient` callout devices through IOKit and
+  resolves USB product, manufacturer, serial number, VID, and PID metadata
+  from the parent registry chain.
+- Windows enumerates present COM ports through SetupAPI.
+
 ## Borrowed asynchronous I/O
 
 The regular `on_data()` and `async_write()` APIs keep buffer ownership simple

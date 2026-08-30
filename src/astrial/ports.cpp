@@ -8,12 +8,18 @@
 #endif
 
 #include <string>
+#include <utility>
+#include <vector>
 #include <astrial/port.hpp>
 #include <astrial/Serial.hpp>
 
 #include <astrial/detail.hpp>
 
-#ifdef _WIN32
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/serial/IOSerialKeys.h>
+#elif defined(_WIN32)
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
@@ -37,12 +43,77 @@ static std::string from_wstring(const wchar_t* src, int len = -1)
 }
 #endif
 
+#if defined(__APPLE__)
+namespace
+{
+CFTypeRef copy_registry_property(io_registry_entry_t service, CFStringRef key,
+                                 bool search_parents)
+{
+    if (!search_parents)
+    {
+        return IORegistryEntryCreateCFProperty(service, key, kCFAllocatorDefault, 0);
+    }
+    return IORegistryEntrySearchCFProperty(
+        service, kIOServicePlane, key, kCFAllocatorDefault,
+        kIORegistryIterateRecursively | kIORegistryIterateParents);
+}
+
+std::string cf_string_to_utf8(CFStringRef value)
+{
+    if (value == nullptr) return {};
+
+    const CFIndex length = CFStringGetLength(value);
+    const CFIndex maximum =
+        CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+    if (maximum <= 1) return {};
+
+    std::vector<char> buffer(static_cast<std::size_t>(maximum));
+    if (!CFStringGetCString(value, buffer.data(), maximum, kCFStringEncodingUTF8))
+    {
+        return {};
+    }
+    return buffer.data();
+}
+
+std::string string_property(io_registry_entry_t service, CFStringRef key,
+                            bool search_parents = true)
+{
+    CFTypeRef property = copy_registry_property(service, key, search_parents);
+    if (property == nullptr) return {};
+
+    std::string result;
+    if (CFGetTypeID(property) == CFStringGetTypeID())
+    {
+        result = cf_string_to_utf8(static_cast<CFStringRef>(property));
+    }
+    CFRelease(property);
+    return result;
+}
+
+uint16_t uint16_property(io_registry_entry_t service, CFStringRef key)
+{
+    CFTypeRef property = copy_registry_property(service, key, true);
+    if (property == nullptr) return 0;
+
+    int value = 0;
+    if (CFGetTypeID(property) != CFNumberGetTypeID() ||
+        !CFNumberGetValue(static_cast<CFNumberRef>(property), kCFNumberIntType, &value) ||
+        value < 0 || value > UINT16_MAX)
+    {
+        value = 0;
+    }
+    CFRelease(property);
+    return static_cast<uint16_t>(value);
+}
+}
+#endif
+
 namespace fs = std::filesystem;
 
 std::vector<SerialInfo> Serial::list_ports()
 {
     std::vector<SerialInfo> ports;
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__)
     try
     {
         fs::path tty_dir("/sys/class/tty");
@@ -107,6 +178,40 @@ std::vector<SerialInfo> Serial::list_ports()
     catch (...)
     {
     };
+#elif defined(__APPLE__)
+    CFMutableDictionaryRef matching = IOServiceMatching(kIOSerialBSDServiceValue);
+    if (matching == nullptr) return ports;
+
+    CFDictionarySetValue(matching, CFSTR(kIOSerialBSDTypeKey),
+                         CFSTR(kIOSerialBSDAllTypes));
+    io_iterator_t iterator = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(MACH_PORT_NULL, matching, &iterator) !=
+        KERN_SUCCESS)
+    {
+        return ports;
+    }
+
+    while (const io_service_t service = IOIteratorNext(iterator))
+    {
+        SerialInfo info;
+        info.port_name = string_property(service, CFSTR(kIOCalloutDeviceKey), false);
+        if (!info.port_name.empty())
+        {
+            info.vendor_id = uint16_property(service, CFSTR("idVendor"));
+            info.product_id = uint16_property(service, CFSTR("idProduct"));
+            info.serial_number = string_property(service, CFSTR("USB Serial Number"));
+            info.manufacturer = string_property(service, CFSTR("USB Vendor Name"));
+            info.description = string_property(service, CFSTR("USB Product Name"));
+            if (info.description.empty())
+            {
+                info.description = string_property(service, CFSTR(kIOTTYDeviceKey), false);
+            }
+            if (info.description.empty()) info.description = "Astrial Serial Port";
+            ports.push_back(std::move(info));
+        }
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(iterator);
 #elif defined(_WIN32)
     const GUID guid = {0x4d36e978, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
     // GUID_DEVCLASS_PORTS
