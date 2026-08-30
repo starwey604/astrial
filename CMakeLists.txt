@@ -10,6 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(BUILD_EXAMPLE "Build example" ON)
 option(ASTRIAL_IO_URING "Try enabling io_uring backend for Astrial library" ON)
+option(ASTRIAL_BUILD_USB "Build the optional libusb bulk transport" OFF)
 
 add_subdirectory(3rdparty)
 
@@ -54,6 +55,19 @@ endif ()
 
 target_compile_definitions(astrial PUBLIC ASTRIAL_READ_BUFFER_LENGTH=${ASTRIAL_READ_BUFFER_SIZE})
 target_compile_definitions(astrial PUBLIC ASTRIAL_WRITE_BUFFER_LENGTH=${ASTRIAL_WRITE_BUFFER_SIZE})
+
+if (ASTRIAL_BUILD_USB)
+    find_package(LibUSB 1.0 REQUIRED)
+    add_library(astrial_usb src/astrial/Usb.cpp)
+    add_library(astrial::usb ALIAS astrial_usb)
+    target_include_directories(astrial_usb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(astrial_usb PUBLIC cxx_std_20)
+    target_compile_definitions(astrial_usb PUBLIC ASTRIAL_HAS_USB=1)
+    target_link_libraries(astrial_usb PUBLIC tl-expected PRIVATE LibUSB::LibUSB)
+    if (WIN32)
+        target_compile_options(astrial_usb PRIVATE /utf-8)
+    endif ()
+endif ()
 
 if (BUILD_EXAMPLE)
     add_subdirectory(examples)

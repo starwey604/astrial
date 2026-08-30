@@ -45,6 +45,42 @@ completion callback, including close, cancellation, and disconnection paths.
 Borrowed write data must remain alive and unchanged until its callback runs.
 The existing `async_write()` API continues to make an owned copy.
 
+## Optional USB bulk transport
+
+Astrial can expose native USB bulk endpoints through an optional libusb-backed
+target. The serial-only library remains dependency-free; enable this target
+when configuring and link `astrial::usb`:
+
+```bash
+cmake -S . -B build-usb -DASTRIAL_BUILD_USB=ON -DASTRIAL_IO_URING=OFF
+cmake --build build-usb
+```
+
+```cpp
+UsbBulkConfig config;
+config.vendor_id = 0x2fe3;
+config.product_id = 0x574c;
+
+auto device = UsbBulkDevice::open(config).value();
+device.start_reads(
+    acquire_rx_buffer,
+    [](const std::error_code& error, UsbBorrowedBuffer buffer,
+       std::size_t length) {
+        consume_and_release(buffer.token, length, error);
+    });
+```
+
+Two IN transfers are queued by default. Their payloads land directly in the
+buffers returned by `acquire_rx_buffer`; returning an empty buffer applies
+backpressure until `resume_reads()` is called. A token may identify the owner
+of each borrowed span. Providers and completion callbacks execute on Astrial's
+libusb event thread.
+
+`async_write_borrowed()` similarly keeps the caller's memory in place until
+completion. Astrial sends an explicit zero-length packet when a non-empty OUT
+transfer is an exact endpoint-packet multiple, including on platforms where
+libusb's automatic ZLP flag is unavailable.
+
 ## Tests
 
 On Linux, the integration test creates a raw pseudo-terminal and exercises both

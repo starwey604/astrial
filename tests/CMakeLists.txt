@@ -3,6 +3,13 @@ target_link_libraries(astrial_list_ports_smoke PRIVATE astrial)
 add_test(NAME astrial_list_ports_smoke COMMAND astrial_list_ports_smoke)
 set_tests_properties(astrial_list_ports_smoke PROPERTIES TIMEOUT 15)
 
+if (TARGET astrial_usb)
+    add_executable(astrial_usb_smoke usb_smoke.cpp)
+    target_link_libraries(astrial_usb_smoke PRIVATE astrial::usb)
+    add_test(NAME astrial_usb_smoke COMMAND astrial_usb_smoke)
+    set_tests_properties(astrial_usb_smoke PROPERTIES TIMEOUT 15)
+endif ()
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     add_executable(astrial_virtual_serial_tests virtual_serial.cpp)
     target_link_libraries(astrial_virtual_serial_tests PRIVATE astrial)
