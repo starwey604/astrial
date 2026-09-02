@@ -141,4 +141,8 @@ borrowed RX buffer. Add `--wait-reconnect` to make each cycle wait for one
 physical disconnect and re-enumeration; the versioned CSV phase line tells an
 external fixture when it is safe to reset or power-cycle the device. The tool
 then requires exactly one disconnect callback, one reconnect callback, and a
-newly submitted read transfer before passing.
+newly submitted read transfer before passing. Some Windows backends report one
+`TransferStalled` completion when firmware removes the Bulk endpoint just
+before disconnecting the device. Reconnect mode records and accepts at most one
+such completion per read slot after the complete disconnect/reconnect sequence;
+normal lifecycle mode still treats every stall as a failure.
