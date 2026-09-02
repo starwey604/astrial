@@ -1,7 +1,7 @@
 {
   "name": "astrial",
   "version-string": "0.1.0",
-  "builtin-baseline": "30ef65cad98f08e7197c9a1656fbd871bcb72f2d",
+  "builtin-baseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
   "dependencies": [],
   "features": {
     "usb": {

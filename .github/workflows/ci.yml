@@ -36,6 +36,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libusb
 
+      - name: Fetch pinned vcpkg baseline (Windows)
+        if: runner.os == 'Windows'
+        run: git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth=1 origin 9e593bb18ea69cc5095e012465dcd675a822ed0d
+
       - name: Configure (Linux/macOS)
         if: runner.os != 'Windows'
         run: cmake -S . -B build -DBUILD_EXAMPLE=ON -DBUILD_TESTING=ON -DASTRIAL_BUILD_USB=ON -DASTRIAL_IO_URING=OFF -DCMAKE_BUILD_TYPE=Release
