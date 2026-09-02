@@ -8,6 +8,18 @@ if (TARGET astrial_usb)
     target_link_libraries(astrial_usb_smoke PRIVATE astrial::usb)
     add_test(NAME astrial_usb_smoke COMMAND astrial_usb_smoke)
     set_tests_properties(astrial_usb_smoke PROPERTIES TIMEOUT 15)
+
+    if (ASTRIAL_BUILD_USB_HIL)
+        add_executable(astrial_usb_lifecycle_hil usb_lifecycle_hil.cpp)
+        target_link_libraries(astrial_usb_lifecycle_hil PRIVATE astrial::usb)
+        target_compile_features(astrial_usb_lifecycle_hil PRIVATE cxx_std_20)
+        if (MSVC)
+            target_compile_options(astrial_usb_lifecycle_hil PRIVATE /W4)
+        elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(astrial_usb_lifecycle_hil PRIVATE
+                -Wall -Wextra -Wpedantic)
+        endif ()
+    endif ()
 endif ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)

@@ -24,6 +24,12 @@ option(ASTRIAL_BUILD_TESTS "Build Astrial tests"
 option(ASTRIAL_ENABLE_IPO "Enable IPO for optimized Astrial configurations" ON)
 option(ASTRIAL_IO_URING "Try enabling io_uring backend for Astrial library" ON)
 option(ASTRIAL_BUILD_USB "Build the optional libusb bulk transport" OFF)
+option(ASTRIAL_BUILD_USB_HIL
+    "Build physical USB lifecycle HIL tools (not registered with CTest)" OFF)
+
+if(ASTRIAL_BUILD_USB_HIL AND NOT ASTRIAL_BUILD_USB)
+    message(FATAL_ERROR "ASTRIAL_BUILD_USB_HIL requires ASTRIAL_BUILD_USB=ON")
+endif()
 
 if(ASTRIAL_BUILD_TESTS)
     enable_testing()

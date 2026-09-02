@@ -121,3 +121,24 @@ cmake -S . -B build -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_IO_URING=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+Physical USB lifecycle checks are deliberately separate from CTest so a
+developer machine without the selected device never fails ordinary CI. Build
+the HIL tool explicitly, then point it at a Vendor Bulk interface:
+
+```bash
+cmake -S . -B build-usb-hil -DCMAKE_BUILD_TYPE=Release \
+  -DASTRIAL_BUILD_USB=ON -DASTRIAL_BUILD_USB_HIL=ON \
+  -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_IO_URING=OFF
+cmake --build build-usb-hil --target astrial_usb_lifecycle_hil
+./build-usb-hil/tests/astrial_usb_lifecycle_hil \
+  --vid 2fe3 --pid 574c --cycles 100
+```
+
+Each cycle verifies `open -> start_reads -> stop_reads -> restart -> close`,
+duplicate/idempotent calls, post-close rejection, and exact return of every
+borrowed RX buffer. Add `--wait-reconnect` to make each cycle wait for one
+physical disconnect and re-enumeration; the versioned CSV phase line tells an
+external fixture when it is safe to reset or power-cycle the device. The tool
+then requires exactly one disconnect callback, one reconnect callback, and a
+newly submitted read transfer before passing.
