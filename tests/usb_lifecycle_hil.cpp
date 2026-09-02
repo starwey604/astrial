@@ -45,6 +45,7 @@ struct Counters
     std::atomic<std::uint64_t> successful_reads{};
     std::atomic<std::uint64_t> cancelled_reads{};
     std::atomic<std::uint64_t> disconnected_reads{};
+    std::atomic<std::uint64_t> stalled_reads{};
     std::atomic<std::uint64_t> unexpected_errors{};
     std::atomic<int> first_unexpected_error{};
     std::atomic<int> first_unexpected_source{};
@@ -64,6 +65,7 @@ struct CycleResult
     std::uint64_t successful_reads{};
     std::uint64_t cancelled_reads{};
     std::uint64_t disconnected_reads{};
+    std::uint64_t stalled_reads{};
     std::uint64_t disconnect_callbacks{};
     std::uint64_t reconnect_callbacks{};
 };
@@ -261,6 +263,9 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
             counters.cancelled_reads.fetch_add(1, std::memory_order_relaxed);
         else if (error == make_error_code(UsbError::DeviceDisconnected))
             counters.disconnected_reads.fetch_add(1, std::memory_order_relaxed);
+        else if (options.wait_reconnect &&
+                 error == make_error_code(UsbError::TransferStalled))
+            counters.stalled_reads.fetch_add(1, std::memory_order_relaxed);
         else
         {
             counters.unexpected_errors.fetch_add(1, std::memory_order_relaxed);
@@ -372,6 +377,9 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
         require(counters.reconnect_callbacks.load(std::memory_order_relaxed) == 1,
                 "reconnect callback count was not one");
         require(stats.reconnects == 1, "USB reconnect counter was not one");
+        require(counters.stalled_reads.load(std::memory_order_relaxed) <=
+                    config.read_queue_depth,
+                "more than one read slot stalled during USB re-enumeration");
     }
 
     auto closed_start = device.start_reads(provider, callback);
@@ -394,6 +402,7 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
         .successful_reads = counters.successful_reads.load(std::memory_order_relaxed),
         .cancelled_reads = counters.cancelled_reads.load(std::memory_order_relaxed),
         .disconnected_reads = counters.disconnected_reads.load(std::memory_order_relaxed),
+        .stalled_reads = counters.stalled_reads.load(std::memory_order_relaxed),
         .disconnect_callbacks =
             counters.disconnect_callbacks.load(std::memory_order_relaxed),
         .reconnect_callbacks =
@@ -435,6 +444,7 @@ int main(int argc, char** argv)
                       << ",read_ok=" << result.successful_reads
                       << ",read_cancelled=" << result.cancelled_reads
                       << ",read_disconnected=" << result.disconnected_reads
+                      << ",read_stalled=" << result.stalled_reads
                       << ",disconnect_callbacks=" << result.disconnect_callbacks
                       << ",reconnect_callbacks=" << result.reconnect_callbacks
                       << ",libusb_errors=" << result.stats.errors
