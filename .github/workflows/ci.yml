@@ -36,17 +36,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libusb
 
-      - name: Install libusb (Windows)
-        if: runner.os == 'Windows'
-        run: vcpkg install libusb:x64-windows
-
       - name: Configure (Linux/macOS)
         if: runner.os != 'Windows'
         run: cmake -S . -B build -DBUILD_EXAMPLE=ON -DBUILD_TESTING=ON -DASTRIAL_BUILD_USB=ON -DASTRIAL_IO_URING=OFF -DCMAKE_BUILD_TYPE=Release
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -DBUILD_EXAMPLE=ON -DBUILD_TESTING=ON -DASTRIAL_BUILD_USB=ON -DASTRIAL_IO_URING=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+        run: cmake -S . -B build -DBUILD_EXAMPLE=ON -DBUILD_TESTING=ON -DASTRIAL_BUILD_USB=ON -DASTRIAL_IO_URING=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_FEATURES=usb
 
       - name: Build
         run: cmake --build build --config Release --parallel

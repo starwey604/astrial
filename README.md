@@ -56,6 +56,27 @@ cmake -S . -B build-usb -DASTRIAL_BUILD_USB=ON -DASTRIAL_IO_URING=OFF
 cmake --build build-usb
 ```
 
+On Windows, Astrial's manifest keeps `libusb` scoped to the optional `usb`
+feature. Configure from a Developer PowerShell with vcpkg's toolchain; CMake
+installs the pinned dependency into the build tree and copies the matching DLL
+beside built executables:
+
+```powershell
+$env:VCPKG_ROOT = "C:\src\vcpkg"
+cmake -S . -B build-usb `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows `
+  -DVCPKG_MANIFEST_FEATURES=usb `
+  -DASTRIAL_BUILD_USB=ON `
+  -DASTRIAL_IO_URING=OFF
+cmake --build build-usb --config Release --parallel
+ctest --test-dir build-usb -C Release --output-on-failure
+```
+
+Use `x64-windows-static` instead when the application deliberately wants a
+static libusb runtime. Astrial's imported target keeps Debug and Release
+libraries separate for multi-configuration MSVC builds.
+
 ```cpp
 UsbBulkConfig config;
 config.device.vendor_id = 0x2fe3;
