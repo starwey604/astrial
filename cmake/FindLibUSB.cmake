@@ -81,6 +81,36 @@ if(LibUSB_FOUND AND NOT TARGET LibUSB::LibUSB)
         set_property(TARGET LibUSB::LibUSB PROPERTY IMPORTED_CONFIGURATIONS
             "${_LibUSB_imported_configurations}")
         unset(_LibUSB_imported_configurations)
+    elseif(WIN32)
+        # Static vcpkg triplets do not provide a runtime DLL. Preserve the
+        # per-configuration library locations instead of assigning the
+        # optimized/debug keyword list produced by
+        # select_library_configurations() to a single IMPORTED_LOCATION.
+        add_library(LibUSB::LibUSB UNKNOWN IMPORTED)
+        set(_LibUSB_imported_configurations "")
+
+        if(LibUSB_LIBRARY_RELEASE)
+            list(APPEND _LibUSB_imported_configurations RELEASE)
+            set_property(TARGET LibUSB::LibUSB PROPERTY
+                IMPORTED_LOCATION_RELEASE "${LibUSB_LIBRARY_RELEASE}")
+            set_property(TARGET LibUSB::LibUSB PROPERTY
+                MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE)
+            set_property(TARGET LibUSB::LibUSB PROPERTY
+                MAP_IMPORTED_CONFIG_MINSIZEREL RELEASE)
+        endif()
+
+        if(LibUSB_LIBRARY_DEBUG)
+            list(APPEND _LibUSB_imported_configurations DEBUG)
+            set_property(TARGET LibUSB::LibUSB PROPERTY
+                IMPORTED_LOCATION_DEBUG "${LibUSB_LIBRARY_DEBUG}")
+        elseif(LibUSB_LIBRARY_RELEASE)
+            set_property(TARGET LibUSB::LibUSB PROPERTY
+                MAP_IMPORTED_CONFIG_DEBUG RELEASE)
+        endif()
+
+        set_property(TARGET LibUSB::LibUSB PROPERTY IMPORTED_CONFIGURATIONS
+            "${_LibUSB_imported_configurations}")
+        unset(_LibUSB_imported_configurations)
     else()
         add_library(LibUSB::LibUSB UNKNOWN IMPORTED)
         set_property(TARGET LibUSB::LibUSB PROPERTY
