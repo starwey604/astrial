@@ -117,7 +117,7 @@ On Linux, the integration test creates a raw pseudo-terminal and exercises both
 owned and borrowed I/O without physical serial hardware:
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON -DASTRIAL_IO_URING=OFF
+cmake -S . -B build -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_IO_URING=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```

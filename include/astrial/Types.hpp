@@ -17,7 +17,7 @@ struct SerialInfo
     std::string description;
     uint16_t vendor_id = 0;
     uint16_t product_id = 0;
-    std::string serial_number; // 硬件唯一序列号
+    std::string serial_number; // Stable hardware serial number
     std::string manufacturer;
 };
 
@@ -29,13 +29,13 @@ std::ostream& operator<<(std::ostream& os, const SerialInfo& info);
 enum class SerialError
 {
     Success = 0,
-    PortNotFound, // 串口不存在
-    PermissionDenied, // 无权限（可能被其他程序占用）
-    InvalidArgument, // 参数错误（如不支持的波特率）
-    DeviceDisconnected, // 设备意外断开
-    ParseError, // 字符串解析失败（如无效的十六进制字符串）
-    ValueOutOfRange, // 值超出范围
-    WriteTimeout, // 同步写超时
+    PortNotFound,
+    PermissionDenied, // The port may already be in use.
+    InvalidArgument, // For example, an unsupported baud rate.
+    DeviceDisconnected,
+    ParseError,
+    ValueOutOfRange,
+    WriteTimeout,
     UnknownError
 };
 

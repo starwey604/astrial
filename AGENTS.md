@@ -10,11 +10,14 @@ cmake --build build
 ```
 
 - Requires CMake >= 3.22, C++20 compiler.
-- `BUILD_EXAMPLE` ON by default; pass `-DBUILD_EXAMPLE=OFF` to skip examples.
+- `ASTRIAL_BUILD_EXAMPLES` and `ASTRIAL_BUILD_TESTS` default ON only when
+  Astrial is the top-level project. `BUILD_EXAMPLE` remains a compatibility
+  input for older standalone build commands.
 - Buffer sizes: `-DASTRIAL_READ_BUFFER_SIZE=<bytes>` / `-DASTRIAL_WRITE_BUFFER_SIZE=<bytes>` (default 4096), exposed as `ASTRIAL_READ_BUFFER_LENGTH` / `ASTRIAL_WRITE_BUFFER_LENGTH`.
 - Vendored deps: `3rdparty/asio`, `3rdparty/tl-expected`, `3rdparty/readerwriterqueue` — no package manager needed.
 - `-DASTRIAL_IO_URING=OFF` to skip io_uring detection. Auto-detected on Linux (kernel >= 5.15 + liburing), falls back to epoll.
-- Windows: links `setupapi` + `cfgfmgr32` automatically. LTO enabled by default.
+- Windows: links `setupapi` + `cfgmgr32` automatically. IPO/LTO is target-local
+  and enabled only for optimized configurations by default.
 
 ## Tests and CI
 
