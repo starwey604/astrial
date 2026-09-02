@@ -299,6 +299,7 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
 
     if (options.wait_reconnect)
     {
+        const auto before_disconnect = device.stats().reads_submitted;
         std::cout << CsvVersion << ",phase,cycle=" << cycle
                   << ",state=waiting_for_disconnect" << std::endl;
         require(wait_until(Clock::now() + options.reconnect_timeout, [&]
@@ -317,9 +318,11 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
                                       device.state() == UsbState::Connected;
                            }),
                 "timed out waiting for USB reconnect");
-        const auto before_rearm = device.stats().reads_submitted;
         require(wait_until(Clock::now() + options.arm_timeout, [&]
-                           { return device.stats().reads_submitted > before_rearm; }),
+                           {
+                               return device.stats().reads_submitted >
+                                      before_disconnect;
+                           }),
                 "read transfer was not rearmed after reconnect");
     }
 
