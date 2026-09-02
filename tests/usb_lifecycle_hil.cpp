@@ -47,6 +47,7 @@ struct Counters
     std::atomic<std::uint64_t> disconnected_reads{};
     std::atomic<std::uint64_t> unexpected_errors{};
     std::atomic<int> first_unexpected_error{};
+    std::atomic<int> first_unexpected_source{};
     std::atomic<std::uint64_t> invalid_buffers{};
     std::atomic<std::uint64_t> disconnect_callbacks{};
     std::atomic<std::uint64_t> reconnect_callbacks{};
@@ -264,8 +265,10 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
         {
             counters.unexpected_errors.fetch_add(1, std::memory_order_relaxed);
             int expected{};
-            (void)counters.first_unexpected_error.compare_exchange_strong(
-                expected, error.value(), std::memory_order_relaxed);
+            if (counters.first_unexpected_error.compare_exchange_strong(
+                    expected, error.value(), std::memory_order_relaxed))
+                counters.first_unexpected_source.store(1,
+                                                       std::memory_order_relaxed);
         }
     };
     device.on_disconnect([&](const std::error_code& error)
@@ -274,8 +277,10 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
         {
             counters.unexpected_errors.fetch_add(1, std::memory_order_relaxed);
             int expected{};
-            (void)counters.first_unexpected_error.compare_exchange_strong(
-                expected, error.value(), std::memory_order_relaxed);
+            if (counters.first_unexpected_error.compare_exchange_strong(
+                    expected, error.value(), std::memory_order_relaxed))
+                counters.first_unexpected_source.store(2,
+                                                       std::memory_order_relaxed);
         }
         counters.disconnect_callbacks.fetch_add(1, std::memory_order_relaxed);
     });
@@ -355,7 +360,11 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
         throw std::runtime_error(
             "unexpected USB completion error value=" +
             std::to_string(counters.first_unexpected_error.load(
-                std::memory_order_relaxed)));
+                std::memory_order_relaxed)) +
+            " source=" +
+            (counters.first_unexpected_source.load(std::memory_order_relaxed) == 1
+                 ? "read"
+                 : "disconnect"));
     if (options.wait_reconnect)
     {
         require(counters.disconnect_callbacks.load(std::memory_order_relaxed) == 1,
