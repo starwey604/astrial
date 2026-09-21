@@ -249,6 +249,13 @@ public:
         std::atomic<bool> submitted{false};
     };
 
+    struct OwnedAllocation
+    {
+        void* pointer{};
+        std::size_t size{};
+        bool dev_mem{false};
+    };
+
     explicit Impl(UsbBulkConfig config) : m_config(std::move(config))
     {
     }
@@ -317,22 +324,12 @@ public:
             return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
         }
 
-        const std::size_t depth = m_read_slots.size();
-        m_owned_allocations.reserve(depth);
-        for (std::size_t index = 0; index < depth; ++index)
+        if (!allocate_owned_buffers(config.buffer_size))
         {
-            void* pointer = allocate_page_aligned(config.buffer_size);
-            if (pointer == nullptr)
-            {
-                release_owned_buffers();
-                return tl::make_unexpected(make_error_code(UsbError::IoError));
-            }
-            m_owned_allocations.push_back(pointer);
-            m_read_slots[index]->owned_storage = {
-                static_cast<std::uint8_t*>(pointer), config.buffer_size};
+            return tl::make_unexpected(make_error_code(UsbError::IoError));
         }
         m_owned_read_callback = std::move(callback);
-        m_owned_reads = true;
+        m_owned_reads.store(true, std::memory_order_release);
         m_read_provider = {};
         m_read_callback = {};
         m_reads_enabled.store(true);
@@ -369,7 +366,7 @@ public:
         m_read_provider = std::move(provider);
         m_read_callback = std::move(callback);
         m_owned_read_callback = {};
-        m_owned_reads = false;
+        m_owned_reads.store(false, std::memory_order_release);
         m_reads_enabled.store(true);
         wake_event_thread();
         return {};
@@ -492,6 +489,20 @@ public:
     {
         std::shared_lock device_lock(m_device_mutex);
         return m_endpoint_info;
+    }
+
+    [[nodiscard]] UsbReadBufferInfo read_buffer_info() const noexcept
+    {
+        UsbReadBufferInfo info;
+        if (m_owned_reads.load(std::memory_order_acquire))
+        {
+            info.buffer_size =
+                m_owned_buffer_size.load(std::memory_order_relaxed);
+            info.depth = m_read_slots.size();
+            info.page_aligned = true;
+            info.zero_copy = m_owned_zero_copy.load(std::memory_order_relaxed);
+        }
+        return info;
     }
 
 #if ASTRIAL_USB_HAS_STATS
@@ -705,13 +716,74 @@ private:
         }
     }
 
-    void release_owned_buffers() noexcept
+    // Prefers libusb DMA memory (zero-copy) and falls back to page-aligned
+    // allocations. On failure every buffer allocated so far is released.
+    bool allocate_owned_buffers(std::size_t size)
     {
-        for (void* pointer : m_owned_allocations) free_page_aligned(pointer);
+        const std::size_t depth = m_read_slots.size();
+        m_owned_allocations.reserve(depth);
+        bool all_dev_mem = true;
+        for (std::size_t index = 0; index < depth; ++index)
+        {
+            OwnedAllocation allocation;
+            allocation.size = size;
+            if (m_handle != nullptr)
+            {
+                auto* device_memory = libusb_dev_mem_alloc(m_handle, size);
+                if (device_memory != nullptr)
+                {
+                    allocation.pointer = device_memory;
+                    allocation.dev_mem = true;
+                }
+            }
+            if (allocation.pointer == nullptr)
+            {
+                allocation.pointer = allocate_page_aligned(size);
+                allocation.dev_mem = false;
+            }
+            if (allocation.pointer == nullptr)
+            {
+                free_owned_buffers();
+                return false;
+            }
+            all_dev_mem = all_dev_mem && allocation.dev_mem;
+            m_owned_allocations.push_back(allocation);
+            m_read_slots[index]->owned_storage = {
+                static_cast<std::uint8_t*>(allocation.pointer), size};
+        }
+        m_owned_buffer_size.store(size, std::memory_order_relaxed);
+        m_owned_zero_copy.store(!m_owned_allocations.empty() && all_dev_mem,
+                                std::memory_order_relaxed);
+        return true;
+    }
+
+    void free_owned_buffers() noexcept
+    {
+        for (auto& allocation : m_owned_allocations)
+        {
+            if (allocation.pointer == nullptr) continue;
+            if (allocation.dev_mem && m_handle != nullptr)
+            {
+                (void)libusb_dev_mem_free(
+                    m_handle, static_cast<unsigned char*>(allocation.pointer),
+                    allocation.size);
+            }
+            else
+            {
+                free_page_aligned(allocation.pointer);
+            }
+        }
         m_owned_allocations.clear();
         for (auto& slot : m_read_slots) slot->owned_storage = {};
+        m_owned_zero_copy.store(false, std::memory_order_relaxed);
+    }
+
+    void release_owned_buffers() noexcept
+    {
+        free_owned_buffers();
         m_owned_read_callback = {};
-        m_owned_reads = false;
+        m_owned_reads.store(false, std::memory_order_release);
+        m_owned_buffer_size.store(0, std::memory_order_relaxed);
     }
 
     void arm_reads()
@@ -729,7 +801,7 @@ private:
             auto& slot = m_read_slots[index];
             if (slot->submitted.load(std::memory_order_acquire)) continue;
 
-            if (m_owned_reads)
+            if (m_owned_reads.load(std::memory_order_acquire))
             {
                 slot->buffer = {slot->owned_storage, index};
             }
@@ -803,7 +875,7 @@ private:
     void deliver_read(ReadSlot& slot, const std::error_code& error, std::size_t size)
     {
         auto buffer = std::exchange(slot.buffer, {});
-        if (m_owned_reads)
+        if (m_owned_reads.load(std::memory_order_acquire))
         {
             const std::size_t valid =
                 size < buffer.bytes.size() ? size : buffer.bytes.size();
@@ -899,12 +971,28 @@ private:
 
     void attempt_reconnect()
     {
+        // DMA buffers are scoped to the file descriptor behind the old handle,
+        // so release them while it is still open and reallocate against the new
+        // handle to keep the read path zero-copy.
+        const bool owned = m_owned_reads.load(std::memory_order_acquire);
+        const std::size_t owned_size =
+            m_owned_buffer_size.load(std::memory_order_relaxed);
+        free_owned_buffers();
+
         close_handle();
         auto result = open_matching_device();
         if (!result)
         {
             m_next_reconnect = std::chrono::steady_clock::now() + m_config.reconnect_interval;
             return;
+        }
+
+        if (owned && !allocate_owned_buffers(owned_size))
+        {
+            // Out of memory: stop the read loop instead of submitting against
+            // buffers that do not exist.
+            m_reads_enabled.store(false);
+            release_owned_buffers();
         }
 
         m_state.store(UsbState::Connected, std::memory_order_release);
@@ -935,8 +1023,10 @@ private:
     ReadBufferProvider m_read_provider;
     ReadCallback m_read_callback;
     OwnedReadCallback m_owned_read_callback;
-    std::vector<void*> m_owned_allocations;
-    bool m_owned_reads{false};
+    std::vector<OwnedAllocation> m_owned_allocations;
+    std::atomic<bool> m_owned_reads{false};
+    std::atomic<bool> m_owned_zero_copy{false};
+    std::atomic<std::size_t> m_owned_buffer_size{0};
     WriteCallback m_write_callback;
     std::function<void(const std::error_code&)> m_disconnect_callback;
     std::function<void()> m_reconnect_callback;
@@ -1113,6 +1203,11 @@ UsbState UsbBulkDevice::state() const noexcept
 UsbBulkEndpointInfo UsbBulkDevice::endpoint_info() const noexcept
 {
     return m_impl ? m_impl->endpoint_info() : UsbBulkEndpointInfo{};
+}
+
+UsbReadBufferInfo UsbBulkDevice::read_buffer_info() const noexcept
+{
+    return m_impl ? m_impl->read_buffer_info() : UsbReadBufferInfo{};
 }
 
 #if ASTRIAL_USB_HAS_STATS

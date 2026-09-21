@@ -114,6 +114,18 @@ struct UsbReadBufferConfig
     std::size_t buffer_size{64 * 1024};
 };
 
+// Reports the library-owned read path. All fields are zero when reads use the
+// borrowed path or have not started. `zero_copy` is true when the buffers came
+// from libusb DMA memory (`libusb_dev_mem_alloc`), in which case the host
+// controller writes into them directly.
+struct UsbReadBufferInfo
+{
+    std::size_t buffer_size{};
+    std::size_t depth{};
+    bool page_aligned{};
+    bool zero_copy{};
+};
+
 enum class UsbState { Disconnected, Connected, Reconnecting, Closed };
 
 class UsbBulkDevice
@@ -162,6 +174,7 @@ public:
     void on_reconnect(std::function<void()> callback);
     [[nodiscard]] UsbState state() const noexcept;
     [[nodiscard]] UsbBulkEndpointInfo endpoint_info() const noexcept;
+    [[nodiscard]] UsbReadBufferInfo read_buffer_info() const noexcept;
 #if defined(ASTRIAL_USB_STATS) && ASTRIAL_USB_STATS
     [[nodiscard]] UsbBulkStats stats() const noexcept;
 #endif

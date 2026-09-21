@@ -94,7 +94,7 @@ device.start_reads_borrowed(
 
 `UsbDeviceSelector` 还可以通过序列号或物理 USB 端口路径锁定设备。Astrial 在声明接口之前会校验所选接口确实暴露了请求的 Bulk 端点。`stop_reads()` 会同步归还所有借用的读取缓冲区；`endpoint_info()` 与 `stats()` 暴露协商后的包大小与传输计数器，且不会在数据路径上引入额外回调。计数器为可选项：使用 `-DASTRIAL_USB_STATS=ON` 配置才会启用，否则 `UsbBulkStats` 与 `stats()` 会被完全编译掉，热路径也不再执行原子更新。
 
-默认会排队八个 IN 传输，可通过 `-DASTRIAL_USB_READ_QUEUE_DEPTH=N`（1..32）配置数量。库自有的 `start_reads()` 会自行分配页对齐缓冲区，从而让 DMA 路径不需要 bounce buffer。使用 `start_reads_borrowed()` 时，负载直接落在 `acquire_rx_buffer` 返回的缓冲区中；返回空缓冲区会施加背压，直到调用 `resume_reads()`。token 可用于标识每个借用 span 的归属。provider 与完成回调在 Astrial 的 libusb 事件线程上执行。读取的 provider/回调分发与单次在途写入闸门在传输热路径上不加锁；生命周期操作仍会对 `start_reads()`/`start_reads_borrowed()`、`stop_reads()`、重连和关闭进行同步。
+默认会排队八个 IN 传输，可通过 `-DASTRIAL_USB_READ_QUEUE_DEPTH=N`（1..32）配置数量。库自有的 `start_reads()` 会自行分配页对齐缓冲区，从而让 DMA 路径不需要 bounce buffer。在内核提供 usbfs DMA 内存的平台上，Astrial 会通过 `libusb_dev_mem_alloc` 取用缓冲区，主机控制器直接写入其中（零拷贝）；`read_buffer_info()` 会报告当前实际模式，并且缓冲区会在重连时重新分配。使用 `start_reads_borrowed()` 时，负载直接落在 `acquire_rx_buffer` 返回的缓冲区中；返回空缓冲区会施加背压，直到调用 `resume_reads()`。token 可用于标识每个借用 span 的归属。provider 与完成回调在 Astrial 的 libusb 事件线程上执行。读取的 provider/回调分发与单次在途写入闸门在传输热路径上不加锁；生命周期操作仍会对 `start_reads()`/`start_reads_borrowed()`、`stop_reads()`、重连和关闭进行同步。
 
 `async_write_borrowed()` 同样会保持调用方的内存在完成前原地不动。当一个非空 OUT 传输恰好是端点包大小的整数倍时，Astrial 会显式发送一个零长度包，即使在 libusb 自动 ZLP 标志不可用的平台上也是如此。
 

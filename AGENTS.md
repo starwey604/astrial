@@ -107,6 +107,9 @@ device.start_reads_borrowed(acquire_rx_buffer, on_read);
   `std::span<const uint8_t>` valid only until it returns; `start_reads_borrowed`
   takes a provider returning a `UsbBorrowedBuffer` (`span` + opaque `token`) and
   `stop_reads()` synchronously returns every outstanding buffer.
+- `read_buffer_info()` reports the owned path's buffer size, depth, page
+  alignment, and whether zero-copy `libusb_dev_mem_alloc` memory is in use; the
+  buffers are reallocated across reconnects so the property is preserved.
 - `async_write_borrowed()` is the only write path; one write may be in flight
   and the caller's memory must stay alive until its callback.
 - Providers and callbacks run on the libusb event thread. In borrowed mode

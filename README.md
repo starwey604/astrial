@@ -122,6 +122,10 @@ the atomic updates entirely.
 Eight IN transfers are queued by default; configure the count with
 `-DASTRIAL_USB_READ_QUEUE_DEPTH=N` (1..32). The library-owned `start_reads()`
 allocates page-aligned buffers itself, so the DMA path avoids a bounce buffer.
+Where the kernel offers usbfs DMA memory, Astrial takes the buffers from
+`libusb_dev_mem_alloc` and the host controller writes into them directly
+(zero-copy); `read_buffer_info()` reports the active mode and the buffers are
+reallocated across reconnects.
 With `start_reads_borrowed()` the payloads land directly in the buffers returned
 by `acquire_rx_buffer`; returning an empty buffer applies backpressure until
 `resume_reads()` is called. A token may identify the owner of each borrowed
