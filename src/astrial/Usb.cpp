@@ -1222,5 +1222,154 @@ void UsbBulkDevice::close()
     if (m_impl) m_impl->close();
 }
 
+class UsbReadBufferPool::Impl
+{
+public:
+    ~Impl()
+    {
+        release_all();
+    }
+
+    bool allocate(std::size_t buffer_size, std::size_t count)
+    {
+        m_buffer_size = buffer_size;
+        m_data.resize(count, nullptr);
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            m_data[index] = allocate_page_aligned(buffer_size);
+            if (m_data[index] == nullptr)
+            {
+                release_all();
+                return false;
+            }
+            m_free.push_back(index);
+        }
+        // Pop from the back, so hand out buffers in ascending index order.
+        std::reverse(m_free.begin(), m_free.end());
+        return true;
+    }
+
+    void release_all() noexcept
+    {
+        for (void* pointer : m_data) free_page_aligned(pointer);
+        m_data.clear();
+        m_free.clear();
+    }
+
+    [[nodiscard]] std::span<std::uint8_t> buffer(std::size_t index) noexcept
+    {
+        if (index >= m_data.size()) return {};
+        return {static_cast<std::uint8_t*>(m_data[index]), m_buffer_size};
+    }
+
+    [[nodiscard]] std::span<const std::uint8_t>
+    buffer(std::size_t index) const noexcept
+    {
+        if (index >= m_data.size()) return {};
+        return {static_cast<const std::uint8_t*>(m_data[index]), m_buffer_size};
+    }
+
+    [[nodiscard]] UsbBorrowedBuffer acquire_buffer() noexcept
+    {
+        std::lock_guard lock(m_mutex);
+        if (m_free.empty()) return {};
+        const std::size_t index = m_free.back();
+        m_free.pop_back();
+        return {buffer(index), index};
+    }
+
+    void release_buffer(UsbBorrowedBuffer borrowed) noexcept
+    {
+        if (borrowed.bytes.empty()) return;
+        const std::size_t index = static_cast<std::size_t>(borrowed.token);
+        std::lock_guard lock(m_mutex);
+        if (index >= m_data.size()) return;
+        if (borrowed.bytes.data() !=
+            static_cast<std::uint8_t*>(m_data[index]))
+        {
+            return;
+        }
+        if (std::find(m_free.begin(), m_free.end(), index) != m_free.end())
+        {
+            return;
+        }
+        m_free.push_back(index);
+    }
+
+    [[nodiscard]] std::size_t count() const noexcept { return m_data.size(); }
+    [[nodiscard]] std::size_t buffer_size() const noexcept
+    {
+        return m_buffer_size;
+    }
+
+private:
+    std::vector<void*> m_data;
+    std::vector<std::size_t> m_free;
+    std::size_t m_buffer_size{};
+    std::mutex m_mutex;
+};
+
+UsbReadBufferPool::UsbReadBufferPool(std::unique_ptr<Impl> implementation)
+    : m_impl(std::move(implementation))
+{
+}
+
+UsbReadBufferPool::~UsbReadBufferPool() = default;
+UsbReadBufferPool::UsbReadBufferPool(UsbReadBufferPool&&) noexcept = default;
+UsbReadBufferPool& UsbReadBufferPool::operator=(UsbReadBufferPool&&) noexcept =
+    default;
+
+tl::expected<UsbReadBufferPool, std::error_code>
+UsbReadBufferPool::create(std::size_t buffer_size, std::size_t count)
+{
+    if (buffer_size == 0 || count == 0 ||
+        buffer_size > static_cast<std::size_t>(INT_MAX))
+    {
+        return tl::make_unexpected(make_error_code(UsbError::InvalidArgument));
+    }
+    auto implementation = std::make_unique<Impl>();
+    if (!implementation->allocate(buffer_size, count))
+    {
+        return tl::make_unexpected(make_error_code(UsbError::IoError));
+    }
+    return UsbReadBufferPool(std::move(implementation));
+}
+
+std::span<std::uint8_t> UsbReadBufferPool::buffer(std::size_t index) noexcept
+{
+    return m_impl ? m_impl->buffer(index) : std::span<std::uint8_t>{};
+}
+
+std::span<const std::uint8_t>
+UsbReadBufferPool::buffer(std::size_t index) const noexcept
+{
+    return m_impl ? m_impl->buffer(index) : std::span<const std::uint8_t>{};
+}
+
+std::size_t UsbReadBufferPool::count() const noexcept
+{
+    return m_impl ? m_impl->count() : 0;
+}
+
+std::size_t UsbReadBufferPool::buffer_size() const noexcept
+{
+    return m_impl ? m_impl->buffer_size() : 0;
+}
+
+std::size_t UsbReadBufferPool::alignment() const noexcept
+{
+    return platform_page_size();
+}
+
+UsbBorrowedBuffer UsbReadBufferPool::acquire() noexcept
+{
+    return m_impl ? m_impl->acquire_buffer() : UsbBorrowedBuffer{};
+}
+
+void UsbReadBufferPool::release(UsbBorrowedBuffer buffer) noexcept
+{
+    if (m_impl && !buffer.bytes.empty()) m_impl->release_buffer(buffer);
+}
+
 #undef ASTRIAL_USB_STAT_ADD
 #undef ASTRIAL_USB_HAS_STATS

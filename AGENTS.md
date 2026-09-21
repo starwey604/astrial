@@ -110,6 +110,9 @@ device.start_reads_borrowed(acquire_rx_buffer, on_read);
 - `read_buffer_info()` reports the owned path's buffer size, depth, page
   alignment, and whether zero-copy `libusb_dev_mem_alloc` memory is in use; the
   buffers are reallocated across reconnects so the property is preserved.
+- `UsbReadBufferPool` (`create`/`buffer`/`acquire`/`release`) is a reusable,
+  handle-independent set of page-aligned buffers for the borrowed provider;
+  `acquire()` returns empty when exhausted to apply backpressure.
 - `async_write_borrowed()` is the only write path; one write may be in flight
   and the caller's memory must stay alive until its callback.
 - Providers and callbacks run on the libusb event thread. In borrowed mode

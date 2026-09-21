@@ -188,6 +188,45 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+// A reusable pool of page-aligned buffers for the borrowed read API. Buffers
+// are allocated once, stay valid for the lifetime of the pool, and are
+// independent of the device handle, so they survive reconnects.
+class UsbReadBufferPool
+{
+public:
+    UsbReadBufferPool() = default;
+
+    static tl::expected<UsbReadBufferPool, std::error_code>
+    create(std::size_t buffer_size, std::size_t count);
+
+    ~UsbReadBufferPool();
+    UsbReadBufferPool(const UsbReadBufferPool&) = delete;
+    UsbReadBufferPool& operator=(const UsbReadBufferPool&) = delete;
+    UsbReadBufferPool(UsbReadBufferPool&&) noexcept;
+    UsbReadBufferPool& operator=(UsbReadBufferPool&&) noexcept;
+
+    [[nodiscard]] std::span<std::uint8_t> buffer(std::size_t index) noexcept;
+    [[nodiscard]] std::span<const std::uint8_t>
+    buffer(std::size_t index) const noexcept;
+    [[nodiscard]] std::size_t count() const noexcept;
+    [[nodiscard]] std::size_t buffer_size() const noexcept;
+    // Alignment of every buffer, in bytes (the platform page size).
+    [[nodiscard]] std::size_t alignment() const noexcept;
+
+    // Hands out a free buffer for a ReadBufferProvider and takes it back in a
+    // completion callback. `acquire()` returns an empty borrowed buffer when
+    // every buffer is checked out, which applies the read loop's backpressure;
+    // call `UsbBulkDevice::resume_reads()` after releasing if the device is
+    // otherwise idle. Both may be called from the event thread.
+    [[nodiscard]] UsbBorrowedBuffer acquire() noexcept;
+    void release(UsbBorrowedBuffer buffer) noexcept;
+
+private:
+    class Impl;
+    explicit UsbReadBufferPool(std::unique_ptr<Impl> implementation);
+    std::unique_ptr<Impl> m_impl;
+};
+
 template <>
 struct std::is_error_code_enum<UsbError> : std::true_type
 {

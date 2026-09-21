@@ -135,6 +135,25 @@ not take a mutex on the transfer hot path; lifecycle operations still
 synchronize `start_reads()`/`start_reads_borrowed()`, `stop_reads()`, reconnect,
 and close.
 
+For borrowed reads, `UsbReadBufferPool` allocates a reusable set of page-aligned
+buffers and tracks which are free, so the provider always hands out a distinct
+live buffer:
+
+```cpp
+auto pool = UsbReadBufferPool::create(64 * 1024, 8).value();
+
+device.start_reads_borrowed(
+    [&] { return pool.acquire(); },
+    [&](const std::error_code& error, UsbBorrowedBuffer buffer,
+        std::size_t length) {
+        consume(buffer, length, error);
+        pool.release(buffer); // returns it to the free list
+    });
+```
+
+`acquire()` returns an empty buffer when every buffer is checked out, which
+applies the read loop's backpressure automatically.
+
 `async_write_borrowed()` similarly keeps the caller's memory in place until
 completion. Astrial sends an explicit zero-length packet when a non-empty OUT
 transfer is an exact endpoint-packet multiple, including on platforms where

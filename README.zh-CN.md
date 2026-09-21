@@ -96,6 +96,22 @@ device.start_reads_borrowed(
 
 默认会排队八个 IN 传输，可通过 `-DASTRIAL_USB_READ_QUEUE_DEPTH=N`（1..32）配置数量。库自有的 `start_reads()` 会自行分配页对齐缓冲区，从而让 DMA 路径不需要 bounce buffer。在内核提供 usbfs DMA 内存的平台上，Astrial 会通过 `libusb_dev_mem_alloc` 取用缓冲区，主机控制器直接写入其中（零拷贝）；`read_buffer_info()` 会报告当前实际模式，并且缓冲区会在重连时重新分配。使用 `start_reads_borrowed()` 时，负载直接落在 `acquire_rx_buffer` 返回的缓冲区中；返回空缓冲区会施加背压，直到调用 `resume_reads()`。token 可用于标识每个借用 span 的归属。provider 与完成回调在 Astrial 的 libusb 事件线程上执行。读取的 provider/回调分发与单次在途写入闸门在传输热路径上不加锁；生命周期操作仍会对 `start_reads()`/`start_reads_borrowed()`、`stop_reads()`、重连和关闭进行同步。
 
+对于 borrowed 读取，`UsbReadBufferPool` 会分配一组可复用的页对齐缓冲区并跟踪空闲状态，保证 provider 每次拿到的都是互不重叠且仍然存活的缓冲区：
+
+```cpp
+auto pool = UsbReadBufferPool::create(64 * 1024, 8).value();
+
+device.start_reads_borrowed(
+    [&] { return pool.acquire(); },
+    [&](const std::error_code& error, UsbBorrowedBuffer buffer,
+        std::size_t length) {
+        consume(buffer, length, error);
+        pool.release(buffer); // 归还到空闲链表
+    });
+```
+
+当所有缓冲区都被占用时，`acquire()` 会返回空缓冲区，自动施加读取循环的背压。
+
 `async_write_borrowed()` 同样会保持调用方的内存在完成前原地不动。当一个非空 OUT 传输恰好是端点包大小的整数倍时，Astrial 会显式发送一个零长度包，即使在 libusb 自动 ZLP 标志不可用的平台上也是如此。
 
 ## 测试
