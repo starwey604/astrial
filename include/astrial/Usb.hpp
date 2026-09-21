@@ -106,6 +106,14 @@ struct UsbBorrowedBuffer
     std::uintptr_t token{};
 };
 
+// Configuration for the library-owned read path. Astrial allocates
+// read_queue_depth buffers of buffer_size bytes each; every allocation is
+// rounded up to the platform page size so DMA paths avoid a bounce buffer.
+struct UsbReadBufferConfig
+{
+    std::size_t buffer_size{64 * 1024};
+};
+
 enum class UsbState { Disconnected, Connected, Reconnecting, Closed };
 
 class UsbBulkDevice
@@ -114,6 +122,8 @@ public:
     using ReadBufferProvider = std::function<UsbBorrowedBuffer()>;
     using ReadCallback =
         std::function<void(const std::error_code&, UsbBorrowedBuffer, std::size_t)>;
+    using OwnedReadCallback =
+        std::function<void(const std::error_code&, std::span<const uint8_t>)>;
     using WriteCallback = std::function<void(const std::error_code&, std::size_t)>;
 
     static tl::expected<std::vector<UsbDeviceInfo>, std::error_code> list_devices();
@@ -127,8 +137,15 @@ public:
     UsbBulkDevice(UsbBulkDevice&&) noexcept;
     UsbBulkDevice& operator=(UsbBulkDevice&&) noexcept;
 
-    tl::expected<void, std::error_code> start_reads(ReadBufferProvider provider,
-                                                    ReadCallback callback);
+    // Starts reads into library-owned, page-aligned buffers. `data` is only
+    // valid until the callback returns; copy it to retain. No provider and no
+    // backpressure bookkeeping are needed.
+    tl::expected<void, std::error_code> start_reads(const UsbReadBufferConfig& config,
+                                                    OwnedReadCallback callback);
+    // Starts reads into caller-owned buffers supplied by `provider`. The
+    // provider must return a distinct, live buffer for every free slot.
+    tl::expected<void, std::error_code> start_reads_borrowed(ReadBufferProvider provider,
+                                                             ReadCallback callback);
     // Stops new reads and synchronously returns every submitted borrowed
     // buffer. Do not call from a USB callback.
     tl::expected<void, std::error_code> stop_reads();

@@ -93,7 +93,16 @@ config.device.vendor_id = 0x2fe3;
 config.device.product_id = 0x574c;
 
 auto device = UsbBulkDevice::open(config).value();
-device.start_reads(
+
+// Astrial can own the read buffers and hand you a view of the payload:
+device.start_reads({.buffer_size = 64 * 1024},
+    [](const std::error_code& error, std::span<const uint8_t> data) {
+        // `data` is valid until the callback returns; copy it to retain.
+        consume(error, data);
+    });
+
+// Or supply and own stable buffers yourself (no copy into the app):
+device.start_reads_borrowed(
     acquire_rx_buffer,
     [](const std::error_code& error, UsbBorrowedBuffer buffer,
        std::size_t length) {
@@ -111,13 +120,16 @@ otherwise `UsbBulkStats` and `stats()` are compiled out and the hot path skips
 the atomic updates entirely.
 
 Eight IN transfers are queued by default; configure the count with
-`-DASTRIAL_USB_READ_QUEUE_DEPTH=N` (1..32). Their payloads land directly in the
-buffers returned by `acquire_rx_buffer`; returning an empty buffer applies
-backpressure until `resume_reads()` is called. A token may identify the owner
-of each borrowed span. Providers and completion callbacks execute on Astrial's
-libusb event thread. The read provider/callback dispatch and single in-flight
-write gate do not take a mutex on the transfer hot path; lifecycle operations
-still synchronize `start_reads()`, `stop_reads()`, reconnect, and close.
+`-DASTRIAL_USB_READ_QUEUE_DEPTH=N` (1..32). The library-owned `start_reads()`
+allocates page-aligned buffers itself, so the DMA path avoids a bounce buffer.
+With `start_reads_borrowed()` the payloads land directly in the buffers returned
+by `acquire_rx_buffer`; returning an empty buffer applies backpressure until
+`resume_reads()` is called. A token may identify the owner of each borrowed
+span. Providers and completion callbacks execute on Astrial's libusb event
+thread. The read provider/callback dispatch and single in-flight write gate do
+not take a mutex on the transfer hot path; lifecycle operations still
+synchronize `start_reads()`/`start_reads_borrowed()`, `stop_reads()`, reconnect,
+and close.
 
 `async_write_borrowed()` similarly keeps the caller's memory in place until
 completion. Astrial sends an explicit zero-length packet when a non-empty OUT

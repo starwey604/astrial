@@ -93,18 +93,25 @@ config.device.vendor_id = 0x2fe3;
 config.device.product_id = 0x574c;
 
 auto device = UsbBulkDevice::open(config).value();
-device.start_reads(acquire_rx_buffer, on_read);
+// Library-owned, page-aligned read buffers:
+device.start_reads({.buffer_size = 64 * 1024},
+                   [](const std::error_code& e, std::span<const uint8_t> data) {});
+// Or caller-owned borrowed buffers:
+device.start_reads_borrowed(acquire_rx_buffer, on_read);
 ```
 
 - `UsbBulkDevice` is move-only; `open()` and `list_devices()` return
   `tl::expected<..., std::error_code>`.
-- Reads are borrowed-only: the provider returns a `UsbBorrowedBuffer` (a `span`
-  plus an opaque `token`), and `stop_reads()` synchronously returns every
-  outstanding buffer.
+- Two read modes: `start_reads(UsbReadBufferConfig, OwnedReadCallback)` has the
+  library allocate page-aligned buffers and the callback receives a
+  `std::span<const uint8_t>` valid only until it returns; `start_reads_borrowed`
+  takes a provider returning a `UsbBorrowedBuffer` (`span` + opaque `token`) and
+  `stop_reads()` synchronously returns every outstanding buffer.
 - `async_write_borrowed()` is the only write path; one write may be in flight
   and the caller's memory must stay alive until its callback.
-- Providers and callbacks run on the libusb event thread. `resume_reads()` is
-  needed after a provider returns an empty buffer (backpressure).
+- Providers and callbacks run on the libusb event thread. In borrowed mode
+  `resume_reads()` is needed after a provider returns an empty buffer
+  (backpressure); the owned mode has no provider and no backpressure.
 - `UsbDeviceSelector` can pin a device by VID/PID plus serial number or physical
   port path; `endpoint_info()`, `stats()` (only when `ASTRIAL_USB_STATS=ON`),
   `state()`, `on_disconnect`, and `on_reconnect` round out the surface.

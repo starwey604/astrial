@@ -294,9 +294,9 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
         counters.reconnect_callbacks.fetch_add(1, std::memory_order_relaxed);
     });
 
-    auto started = device.start_reads(provider, callback);
+    auto started = device.start_reads_borrowed(provider, callback);
     if (!started) throw std::system_error(started.error(), "start_reads");
-    auto duplicate = device.start_reads(provider, callback);
+    auto duplicate = device.start_reads_borrowed(provider, callback);
     require(!duplicate && duplicate.error() == make_error_code(UsbError::InterfaceBusy),
             "duplicate start_reads did not return InterfaceBusy");
     require(wait_until(Clock::now() + options.arm_timeout, [&]
@@ -312,7 +312,7 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
     require(after_stop.reads_submitted == after_stop.reads_completed,
             "stop_reads returned before all read transfers completed");
 
-    started = device.start_reads(provider, callback);
+    started = device.start_reads_borrowed(provider, callback);
     if (!started) throw std::system_error(started.error(), "restart reads");
     require(wait_until(Clock::now() + options.arm_timeout, [&]
                        { return device.stats().reads_submitted > after_stop.reads_submitted; }),
@@ -382,7 +382,7 @@ CycleResult run_cycle(const Options& options, std::size_t cycle)
                 "more than one read slot stalled during USB re-enumeration");
     }
 
-    auto closed_start = device.start_reads(provider, callback);
+    auto closed_start = device.start_reads_borrowed(provider, callback);
     require(!closed_start &&
                 closed_start.error() == make_error_code(UsbError::DeviceDisconnected),
             "start_reads after close did not fail as disconnected");

@@ -4,6 +4,10 @@
 
 #if defined(_WIN32)
 #include <winsock2.h>
+#include <windows.h>
+#include <malloc.h>
+#else
+#include <unistd.h>
 #endif
 
 #include <libusb.h>
@@ -12,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <shared_mutex>
@@ -32,6 +37,45 @@
 
 namespace
 {
+std::size_t platform_page_size() noexcept
+{
+#if defined(_WIN32)
+    SYSTEM_INFO info{};
+    ::GetSystemInfo(&info);
+    return info.dwPageSize != 0 ? static_cast<std::size_t>(info.dwPageSize)
+                                : static_cast<std::size_t>(4096);
+#else
+    const long value = ::sysconf(_SC_PAGESIZE);
+    return value > 0 ? static_cast<std::size_t>(value)
+                     : static_cast<std::size_t>(4096);
+#endif
+}
+
+// Page-aligned allocations keep DMA paths from needing a bounce buffer. The
+// size is rounded up so the alignment holds for the whole block.
+void* allocate_page_aligned(std::size_t size) noexcept
+{
+    if (size == 0) return nullptr;
+    const std::size_t page = platform_page_size();
+    const std::size_t rounded = (size + page - 1) / page * page;
+#if defined(_WIN32)
+    return ::_aligned_malloc(rounded, page);
+#else
+    void* pointer{};
+    if (::posix_memalign(&pointer, page, rounded) != 0) return nullptr;
+    return pointer;
+#endif
+}
+
+void free_page_aligned(void* pointer) noexcept
+{
+#if defined(_WIN32)
+    ::_aligned_free(pointer);
+#else
+    std::free(pointer);
+#endif
+}
+
 class UsbErrorCategory final : public std::error_category
 {
 public:
@@ -200,6 +244,8 @@ public:
         Impl* owner{};
         libusb_transfer* transfer{};
         UsbBorrowedBuffer buffer{};
+        // Non-empty only in the library-owned read mode.
+        std::span<uint8_t> owned_storage{};
         std::atomic<bool> submitted{false};
     };
 
@@ -247,8 +293,55 @@ public:
         return {};
     }
 
-    tl::expected<void, std::error_code> start_reads(ReadBufferProvider provider,
-                                                    ReadCallback callback)
+    tl::expected<void, std::error_code> start_reads(const UsbReadBufferConfig& config,
+                                                    OwnedReadCallback callback)
+    {
+        if (!callback || config.buffer_size == 0 ||
+            config.buffer_size > static_cast<std::size_t>(INT_MAX))
+        {
+            return tl::make_unexpected(make_error_code(UsbError::InvalidArgument));
+        }
+        if (m_stopping.load(std::memory_order_acquire))
+        {
+            return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
+        }
+        if (m_event_thread.joinable() &&
+            m_event_thread.get_id() == std::this_thread::get_id())
+        {
+            return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
+        }
+
+        std::lock_guard lifecycle_lock(m_read_lifecycle_mutex);
+        if (m_reads_enabled.load())
+        {
+            return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
+        }
+
+        const std::size_t depth = m_read_slots.size();
+        m_owned_allocations.reserve(depth);
+        for (std::size_t index = 0; index < depth; ++index)
+        {
+            void* pointer = allocate_page_aligned(config.buffer_size);
+            if (pointer == nullptr)
+            {
+                release_owned_buffers();
+                return tl::make_unexpected(make_error_code(UsbError::IoError));
+            }
+            m_owned_allocations.push_back(pointer);
+            m_read_slots[index]->owned_storage = {
+                static_cast<std::uint8_t*>(pointer), config.buffer_size};
+        }
+        m_owned_read_callback = std::move(callback);
+        m_owned_reads = true;
+        m_read_provider = {};
+        m_read_callback = {};
+        m_reads_enabled.store(true);
+        wake_event_thread();
+        return {};
+    }
+
+    tl::expected<void, std::error_code>
+    start_reads_borrowed(ReadBufferProvider provider, ReadCallback callback)
     {
         if (!provider || !callback)
         {
@@ -258,9 +351,9 @@ public:
         {
             return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
         }
-        // start_reads() locks the lifecycle mutex, and stop_reads() holds that
-        // mutex while waiting for the event thread to retire in-flight reads.
-        // Calling start_reads() from the event thread could therefore deadlock,
+        // The lifecycle mutex is taken below, and stop_reads() holds it while
+        // waiting for the event thread to retire in-flight reads. Calling
+        // either start function from the event thread could therefore deadlock,
         // so reject it the same way stop_reads() does.
         if (m_event_thread.joinable() &&
             m_event_thread.get_id() == std::this_thread::get_id())
@@ -275,6 +368,8 @@ public:
         }
         m_read_provider = std::move(provider);
         m_read_callback = std::move(callback);
+        m_owned_read_callback = {};
+        m_owned_reads = false;
         m_reads_enabled.store(true);
         wake_event_thread();
         return {};
@@ -313,6 +408,7 @@ public:
         }
         m_read_provider = {};
         m_read_callback = {};
+        release_owned_buffers();
         return {};
     }
 
@@ -454,6 +550,7 @@ public:
         }
 
         if (m_cleanup_done.exchange(true, std::memory_order_acq_rel)) return;
+        release_owned_buffers();
         for (const auto& slot : m_read_slots)
         {
             libusb_free_transfer(slot->transfer);
@@ -608,6 +705,15 @@ private:
         }
     }
 
+    void release_owned_buffers() noexcept
+    {
+        for (void* pointer : m_owned_allocations) free_page_aligned(pointer);
+        m_owned_allocations.clear();
+        for (auto& slot : m_read_slots) slot->owned_storage = {};
+        m_owned_read_callback = {};
+        m_owned_reads = false;
+    }
+
     void arm_reads()
     {
         m_arming_reads.store(true);
@@ -618,11 +724,19 @@ private:
             return;
         }
 
-        for (const auto& slot : m_read_slots)
+        for (std::size_t index = 0; index < m_read_slots.size(); ++index)
         {
+            auto& slot = m_read_slots[index];
             if (slot->submitted.load(std::memory_order_acquire)) continue;
 
-            slot->buffer = m_read_provider();
+            if (m_owned_reads)
+            {
+                slot->buffer = {slot->owned_storage, index};
+            }
+            else
+            {
+                slot->buffer = m_read_provider();
+            }
             if (slot->buffer.bytes.empty()) continue;
             if (slot->buffer.bytes.size() > static_cast<std::size_t>(INT_MAX))
             {
@@ -689,7 +803,19 @@ private:
     void deliver_read(ReadSlot& slot, const std::error_code& error, std::size_t size)
     {
         auto buffer = std::exchange(slot.buffer, {});
-        if (m_read_callback) m_read_callback(error, buffer, size);
+        if (m_owned_reads)
+        {
+            const std::size_t valid =
+                size < buffer.bytes.size() ? size : buffer.bytes.size();
+            if (m_owned_read_callback)
+            {
+                m_owned_read_callback(error, buffer.bytes.first(valid));
+            }
+        }
+        else if (m_read_callback)
+        {
+            m_read_callback(error, buffer, size);
+        }
     }
 
     static void LIBUSB_CALL write_completed(libusb_transfer* transfer)
@@ -808,6 +934,9 @@ private:
     mutable std::shared_mutex m_device_mutex;
     ReadBufferProvider m_read_provider;
     ReadCallback m_read_callback;
+    OwnedReadCallback m_owned_read_callback;
+    std::vector<void*> m_owned_allocations;
+    bool m_owned_reads{false};
     WriteCallback m_write_callback;
     std::function<void(const std::error_code&)> m_disconnect_callback;
     std::function<void()> m_reconnect_callback;
@@ -923,13 +1052,23 @@ UsbBulkDevice::UsbBulkDevice(UsbBulkDevice&&) noexcept = default;
 UsbBulkDevice& UsbBulkDevice::operator=(UsbBulkDevice&&) noexcept = default;
 
 tl::expected<void, std::error_code>
-UsbBulkDevice::start_reads(ReadBufferProvider provider, ReadCallback callback)
+UsbBulkDevice::start_reads(const UsbReadBufferConfig& config, OwnedReadCallback callback)
 {
     if (!m_impl)
     {
         return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
     }
-    return m_impl->start_reads(std::move(provider), std::move(callback));
+    return m_impl->start_reads(config, std::move(callback));
+}
+
+tl::expected<void, std::error_code>
+UsbBulkDevice::start_reads_borrowed(ReadBufferProvider provider, ReadCallback callback)
+{
+    if (!m_impl)
+    {
+        return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
+    }
+    return m_impl->start_reads_borrowed(std::move(provider), std::move(callback));
 }
 
 tl::expected<void, std::error_code> UsbBulkDevice::stop_reads()
