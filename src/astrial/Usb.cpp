@@ -14,8 +14,21 @@
 #include <climits>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
+
+// Statistics counters are opt-in at configure time. When ASTRIAL_USB_STATS is
+// off, the counter members and the public stats() API are compiled out and the
+// hot path performs no atomic read-modify-write operations at all.
+#if defined(ASTRIAL_USB_STATS) && ASTRIAL_USB_STATS
+#  define ASTRIAL_USB_HAS_STATS 1
+#  define ASTRIAL_USB_STAT_ADD(counter, amount) \
+        ((counter).fetch_add((amount), std::memory_order_relaxed))
+#else
+#  define ASTRIAL_USB_HAS_STATS 0
+#  define ASTRIAL_USB_STAT_ADD(counter, amount) ((void)0)
+#endif
 
 namespace
 {
@@ -245,6 +258,15 @@ public:
         {
             return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
         }
+        // start_reads() locks the lifecycle mutex, and stop_reads() holds that
+        // mutex while waiting for the event thread to retire in-flight reads.
+        // Calling start_reads() from the event thread could therefore deadlock,
+        // so reject it the same way stop_reads() does.
+        if (m_event_thread.joinable() &&
+            m_event_thread.get_id() == std::this_thread::get_id())
+        {
+            return tl::make_unexpected(make_error_code(UsbError::InterfaceBusy));
+        }
 
         std::lock_guard lifecycle_lock(m_read_lifecycle_mutex);
         if (m_reads_enabled.load())
@@ -276,7 +298,7 @@ public:
             {
                 if (libusb_cancel_transfer(slot->transfer) == LIBUSB_SUCCESS)
                 {
-                    m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                    ASTRIAL_USB_STAT_ADD(m_cancellations, 1);
                 }
             }
         }
@@ -319,6 +341,11 @@ public:
             return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
         }
 
+        // Hold the device lock across reading m_handle/m_endpoint_info and the
+        // submit so a concurrently reconnecting event thread cannot close the
+        // handle underneath this transfer.
+        std::shared_lock device_lock(m_device_mutex);
+
         m_write_callback = std::move(callback);
         m_write_size = data.size();
         m_write_needs_zlp = !data.empty() &&
@@ -336,14 +363,14 @@ public:
             m_write_submitted.store(false, std::memory_order_release);
             m_write_callback = {};
             m_write_active.store(false, std::memory_order_release);
-            m_errors.fetch_add(1, std::memory_order_relaxed);
+            ASTRIAL_USB_STAT_ADD(m_errors, 1);
             return tl::make_unexpected(from_libusb_error(result));
         }
-        m_writes_submitted.fetch_add(1, std::memory_order_relaxed);
+        ASTRIAL_USB_STAT_ADD(m_writes_submitted, 1);
         if (m_stopping.load(std::memory_order_acquire) &&
             libusb_cancel_transfer(m_write_transfer) == LIBUSB_SUCCESS)
         {
-            m_cancellations.fetch_add(1, std::memory_order_relaxed);
+            ASTRIAL_USB_STAT_ADD(m_cancellations, 1);
         }
         return {};
     }
@@ -367,10 +394,11 @@ public:
 
     [[nodiscard]] UsbBulkEndpointInfo endpoint_info() const noexcept
     {
-        std::lock_guard lock(m_mutex);
+        std::shared_lock device_lock(m_device_mutex);
         return m_endpoint_info;
     }
 
+#if ASTRIAL_USB_HAS_STATS
     [[nodiscard]] UsbBulkStats stats() const noexcept
     {
         return {
@@ -385,6 +413,7 @@ public:
             .reconnects = m_reconnects.load(std::memory_order_relaxed),
         };
     }
+#endif
 
     void close()
     {
@@ -398,7 +427,7 @@ public:
                 {
                     if (libusb_cancel_transfer(slot->transfer) == LIBUSB_SUCCESS)
                     {
-                        m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                        ASTRIAL_USB_STAT_ADD(m_cancellations, 1);
                     }
                 }
             }
@@ -406,7 +435,7 @@ public:
             {
                 if (libusb_cancel_transfer(m_write_transfer) == LIBUSB_SUCCESS)
                 {
-                    m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                    ASTRIAL_USB_STAT_ADD(m_cancellations, 1);
                 }
             }
             wake_event_thread();
@@ -511,9 +540,9 @@ private:
                 continue;
             }
 
-            m_handle = candidate;
             {
-                std::lock_guard lock(m_mutex);
+                std::unique_lock device_lock(m_device_mutex);
+                m_handle = candidate;
                 m_endpoint_info = endpoint_info.value();
             }
             libusb_free_device_list(devices, 1);
@@ -526,6 +555,7 @@ private:
 
     void close_handle()
     {
+        std::unique_lock device_lock(m_device_mutex);
         if (m_handle == nullptr) return;
         (void)libusb_release_interface(m_handle,
                                        m_config.bulk_interface.interface_number);
@@ -610,7 +640,7 @@ private:
             if (result != LIBUSB_SUCCESS)
             {
                 slot->submitted.store(false, std::memory_order_release);
-                m_errors.fetch_add(1, std::memory_order_relaxed);
+                ASTRIAL_USB_STAT_ADD(m_errors, 1);
                 deliver_read(*slot, from_libusb_error(result), 0);
                 if (result == LIBUSB_ERROR_NO_DEVICE)
                 {
@@ -620,7 +650,7 @@ private:
             }
             else
             {
-                m_reads_submitted.fetch_add(1, std::memory_order_relaxed);
+                ASTRIAL_USB_STAT_ADD(m_reads_submitted, 1);
             }
         }
         m_arming_reads.store(false);
@@ -636,18 +666,17 @@ private:
                           transfer->actual_length > 0
                               ? static_cast<std::size_t>(transfer->actual_length)
                               : 0);
-        self.m_reads_completed.fetch_add(1, std::memory_order_relaxed);
+        ASTRIAL_USB_STAT_ADD(self.m_reads_completed, 1);
         if (!error)
         {
-            self.m_bytes_received.fetch_add(
+            ASTRIAL_USB_STAT_ADD(self.m_bytes_received,
                 transfer->actual_length > 0
                     ? static_cast<std::size_t>(transfer->actual_length)
-                    : 0,
-                std::memory_order_relaxed);
+                    : 0);
         }
         else if (error != make_error_code(UsbError::TransferCancelled))
         {
-            self.m_errors.fetch_add(1, std::memory_order_relaxed);
+            ASTRIAL_USB_STAT_ADD(self.m_errors, 1);
         }
         slot.submitted.store(false, std::memory_order_release);
         slot.submitted.notify_all();
@@ -694,14 +723,14 @@ private:
         }
         m_write_active.store(false, std::memory_order_release);
         if (callback) callback(error, transferred);
-        m_writes_completed.fetch_add(1, std::memory_order_relaxed);
+        ASTRIAL_USB_STAT_ADD(m_writes_completed, 1);
         if (!error)
         {
-            m_bytes_transmitted.fetch_add(transferred, std::memory_order_relaxed);
+            ASTRIAL_USB_STAT_ADD(m_bytes_transmitted, transferred);
         }
         else if (error != make_error_code(UsbError::TransferCancelled))
         {
-            m_errors.fetch_add(1, std::memory_order_relaxed);
+            ASTRIAL_USB_STAT_ADD(m_errors, 1);
         }
     }
 
@@ -721,7 +750,7 @@ private:
             {
                 if (libusb_cancel_transfer(slot->transfer) == LIBUSB_SUCCESS)
                 {
-                    m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                    ASTRIAL_USB_STAT_ADD(m_cancellations, 1);
                 }
             }
         }
@@ -729,7 +758,7 @@ private:
         {
             if (libusb_cancel_transfer(m_write_transfer) == LIBUSB_SUCCESS)
             {
-                m_cancellations.fetch_add(1, std::memory_order_relaxed);
+                ASTRIAL_USB_STAT_ADD(m_cancellations, 1);
             }
         }
         m_next_reconnect = std::chrono::steady_clock::now() + m_config.reconnect_interval;
@@ -753,7 +782,7 @@ private:
         }
 
         m_state.store(UsbState::Connected, std::memory_order_release);
-        m_reconnects.fetch_add(1, std::memory_order_relaxed);
+        ASTRIAL_USB_STAT_ADD(m_reconnects, 1);
         std::function<void()> callback;
         {
             std::lock_guard lock(m_mutex);
@@ -772,6 +801,11 @@ private:
 
     mutable std::mutex m_mutex;
     std::mutex m_read_lifecycle_mutex;
+    // Protects m_handle and m_endpoint_info against the cross-thread write path.
+    // The event thread touches both from its own thread when arming reads and
+    // completing writes; async_write_borrowed() and endpoint_info() take a
+    // shared lock, while handle (re)open and close take a unique lock.
+    mutable std::shared_mutex m_device_mutex;
     ReadBufferProvider m_read_provider;
     ReadCallback m_read_callback;
     WriteCallback m_write_callback;
@@ -787,7 +821,10 @@ private:
     std::atomic<UsbState> m_state{UsbState::Disconnected};
     std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_cleanup_done{false};
-    std::atomic<uint64_t> m_reads_submitted{};
+#if ASTRIAL_USB_HAS_STATS
+    // Kept on their own cache line so the event thread's hot flag updates and
+    // any stats() reader do not share one with the counters.
+    alignas(64) std::atomic<uint64_t> m_reads_submitted{};
     std::atomic<uint64_t> m_reads_completed{};
     std::atomic<uint64_t> m_bytes_received{};
     std::atomic<uint64_t> m_writes_submitted{};
@@ -796,6 +833,7 @@ private:
     std::atomic<uint64_t> m_cancellations{};
     std::atomic<uint64_t> m_errors{};
     std::atomic<uint64_t> m_reconnects{};
+#endif
     std::chrono::steady_clock::time_point m_next_reconnect{};
 };
 
@@ -938,12 +976,17 @@ UsbBulkEndpointInfo UsbBulkDevice::endpoint_info() const noexcept
     return m_impl ? m_impl->endpoint_info() : UsbBulkEndpointInfo{};
 }
 
+#if ASTRIAL_USB_HAS_STATS
 UsbBulkStats UsbBulkDevice::stats() const noexcept
 {
     return m_impl ? m_impl->stats() : UsbBulkStats{};
 }
+#endif
 
 void UsbBulkDevice::close()
 {
     if (m_impl) m_impl->close();
 }
+
+#undef ASTRIAL_USB_STAT_ADD
+#undef ASTRIAL_USB_HAS_STATS

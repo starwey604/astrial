@@ -78,6 +78,8 @@ struct UsbBulkEndpointInfo
     uint16_t maximum_packet_size_out{};
 };
 
+#if defined(ASTRIAL_USB_STATS) && ASTRIAL_USB_STATS
+// Only available when astrial::usb is built with ASTRIAL_USB_STATS=1.
 struct UsbBulkStats
 {
     uint64_t reads_submitted{};
@@ -90,6 +92,7 @@ struct UsbBulkStats
     uint64_t errors{};
     uint64_t reconnects{};
 };
+#endif
 
 struct UsbBorrowedBuffer
 {
@@ -136,7 +139,9 @@ public:
     void on_reconnect(std::function<void()> callback);
     [[nodiscard]] UsbState state() const noexcept;
     [[nodiscard]] UsbBulkEndpointInfo endpoint_info() const noexcept;
+#if defined(ASTRIAL_USB_STATS) && ASTRIAL_USB_STATS
     [[nodiscard]] UsbBulkStats stats() const noexcept;
+#endif
     // May be called from a callback. The object itself must be destroyed from
     // another thread so its event thread can be joined safely.
     void close();

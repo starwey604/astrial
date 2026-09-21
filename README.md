@@ -1,8 +1,18 @@
-# Astrial - Astro Serial Library
+# Astrial — Cross-Platform C++20 Device I/O Library
 
-一个基于 asio 的 跨平台 现代 C++ 串行通信库。支持设备信息获取等使用功能。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## Platform discovery
+Astrial 是一个基于 asio 的 跨平台 现代 C++20 主机侧设备通信库，面向与嵌入式设备的通信场景。它提供类似 QSerialPort 的串口 API，并可通过可选的 libusb 后端直接收发 USB Bulk 端点数据；串口部分保持零第三方依赖，USB 传输按需启用。
+
+A modern C++20 host-side transport library for embedded devices. One API
+surface, two transports:
+
+- **Serial** — QSerialPort-style synchronous/async API on top of ASIO, with
+  cross-platform port discovery (VID/PID, manufacturer, serial number).
+- **USB bulk** — optional libusb-backed raw endpoint access for vendor-specific
+  protocols, with borrowed buffers, backpressure, and reconnect handling.
+
+## Serial port discovery
 
 - Linux enumerates physical TTY devices through sysfs.
 - macOS enumerates `IOSerialBSDClient` callout devices through IOKit and
@@ -96,7 +106,9 @@ USB port path. Astrial validates that the selected interface exposes the
 requested bulk endpoints before claiming it. `stop_reads()` synchronously
 returns all borrowed read buffers; `endpoint_info()` and `stats()` expose the
 negotiated packet sizes and transfer counters without adding callbacks to the
-data path.
+data path. The counters are opt-in: configure with `-DASTRIAL_USB_STATS=ON`,
+otherwise `UsbBulkStats` and `stats()` are compiled out and the hot path skips
+the atomic updates entirely.
 
 Two IN transfers are queued by default. Their payloads land directly in the
 buffers returned by `acquire_rx_buffer`; returning an empty buffer applies

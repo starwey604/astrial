@@ -26,6 +26,8 @@ option(ASTRIAL_IO_URING "Try enabling io_uring backend for Astrial library" ON)
 option(ASTRIAL_BUILD_USB "Build the optional libusb bulk transport" OFF)
 option(ASTRIAL_BUILD_USB_HIL
     "Build physical USB lifecycle HIL tools (not registered with CTest)" OFF)
+option(ASTRIAL_USB_STATS
+    "Expose USB bulk transfer statistics counters for performance analysis" OFF)
 
 if(ASTRIAL_BUILD_USB_HIL AND NOT ASTRIAL_BUILD_USB)
     message(FATAL_ERROR "ASTRIAL_BUILD_USB_HIL requires ASTRIAL_BUILD_USB=ON")
@@ -116,6 +118,13 @@ if (ASTRIAL_BUILD_USB)
     target_compile_features(astrial_usb PUBLIC cxx_std_20)
     _astrial_configure_ipo(astrial_usb)
     target_compile_definitions(astrial_usb PUBLIC ASTRIAL_HAS_USB=1)
+    # Statistics counters are opt-in. The macro is PUBLIC because it gates the
+    # public UsbBulkStats type and UsbBulkDevice::stats(), so consumers must see
+    # the same definition as the library build. The HIL tool asserts on stats, so
+    # it forces the feature on.
+    if (ASTRIAL_USB_STATS OR ASTRIAL_BUILD_USB_HIL)
+        target_compile_definitions(astrial_usb PUBLIC ASTRIAL_USB_STATS=1)
+    endif ()
     target_link_libraries(astrial_usb PUBLIC tl-expected PRIVATE LibUSB::LibUSB)
     if (WIN32)
         target_compile_options(astrial_usb PRIVATE /utf-8)
