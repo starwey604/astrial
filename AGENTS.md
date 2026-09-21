@@ -26,6 +26,10 @@ cmake --build build
   PUBLIC, which is what makes `astrial.hpp` expose `Usb.hpp`.
 - `-DASTRIAL_BUILD_USB_HIL=ON` builds the physical USB lifecycle test tool; it
   requires `-DASTRIAL_BUILD_USB=ON` and is not registered with CTest.
+- `-DASTRIAL_BUILD_HIL_TESTS=ON` (default OFF) builds and registers the
+  hardware-in-the-loop CTest entries. They exit with 77 (CTest "skipped") when
+  the required fixture/environment is absent, so an ordinary machine stays
+  green. It requires `-DASTRIAL_BUILD_TESTS=ON`.
 - `-DASTRIAL_USB_READ_QUEUE_DEPTH=<n>` (default 8, range 1..32) sets the default
   `UsbBulkConfig::read_queue_depth` (in-flight USB bulk IN transfers); it is a
   PUBLIC definition on `astrial::usb` because the header uses it.
@@ -43,6 +47,17 @@ cmake --build build
 - CTest always runs a `Serial::list_ports()` smoke test.
 - Linux and macOS additionally run end-to-end serial I/O tests over a pseudo-terminal.
 - When the USB target is built, CTest also runs `astrial_usb_smoke`.
+- Testing policy: prefer software simulation (a pseudo-terminal on Linux/macOS)
+  for anything it can reproduce, and only fall back to hardware when it cannot
+  (do not force a simulation that does not reflect real behavior). A Linux PTY
+  preserves the baud rate, stop bits, and flow-control flags, but its driver
+  forces 8N1, so parity enable and character size are *not* observable and are
+  left to hardware. Modem lines, break, RS-485, and line-error counters are also
+  hardware-only.
+- `tests/serial_hil.cpp` collects the hardware-only serial checks. It is built
+  only with `ASTRIAL_BUILD_HIL_TESTS=ON`; it is still a scaffold, reports the
+  planned checks, and skips (exit 77) until the fixture exists. Never require
+  hardware for the default CTest run.
 - USB lifecycle HIL (`tests/usb_lifecycle_hil.cpp`) is only built with
   `ASTRIAL_BUILD_USB_HIL=ON` and is never registered with CTest — run it
   manually against a real Vendor Bulk device so ordinary CI never needs hardware.
@@ -79,11 +94,17 @@ serial.write(cmd); // synchronous write
 
 - `Serial` is move-only (delete copy). Uses PIMPL with background `asio::io_context` thread.
 - `SerialBuilder` returns `tl::expected<Serial, std::error_code>`.
-- Builder supports `baud_rate`, `parity`, `stop_bits`, `data_bits`, `auto_reconnect`.
+- Builder supports `baud_rate`, `parity`, `stop_bits`, `data_bits`, `flow_control`
+  (`None`/`Software`/`Hardware`), `auto_reconnect`.
 - Port listing: `Serial::list_ports()` returns `std::vector<SerialInfo>`.
 - `SerialBuilder::open()` has two overloads: by name (`std::string_view`, e.g. `"/dev/ttyACM0"`) or by `SerialInfo`.
 - `write()` is synchronous but returns `tl::expected<void, std::error_code>` (not `void`). `async_write()` exists for async.
 - Callbacks: `on_data`, `on_disconnect`, `on_reconnect`. `close()` tears down the connection.
+- Runtime control while open: `set_baud_rate`/`set_parity`/`set_stop_bits`/
+  `set_data_bits`/`set_flow_control` return `tl::expected<void, std::error_code>`
+  (the change runs on the I/O thread) and update the stored settings so an
+  automatic reconnect reopens with them. `state()` returns `SerialState` and
+  `is_open()` is true only while `Connected` (false during `Reconnecting`).
 
 ### USB bulk API (`astrial::usb`, `ASTRIAL_HAS_USB`)
 

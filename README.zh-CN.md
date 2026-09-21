@@ -15,6 +15,26 @@ Astrial 是一个基于 asio 的 跨平台 现代 C++20 主机侧设备通信库
 - macOS 通过 IOKit 枚举 `IOSerialBSDClient` callout 设备，并从父级注册表链解析 USB 产品、厂商、序列号、VID 与 PID 元数据。
 - Windows 通过 SetupAPI 枚举当前存在的 COM 端口。
 
+## 串口配置与运行时控制
+
+```cpp
+auto serial = Serial::builder()
+    .baud_rate(115200)
+    .data_bits(DataBits::Eight)
+    .parity(Parity::None)
+    .stop_bits(StopBits::One)
+    .flow_control(FlowControl::Hardware) // None | Software | Hardware
+    .auto_reconnect(true)
+    .open("/dev/ttyACM0")
+    .value();
+
+serial.set_baud_rate(921600); // 就地重配置已打开的端口
+serial.set_flow_control(FlowControl::None);
+if (serial.is_open()) { /* state() == SerialState::Connected */ }
+```
+
+运行时 setter 返回 `tl::expected<void, std::error_code>`，在 I/O 线程上执行，并会更新已保存的设置，使自动重连能够以新配置重新打开端口。`state()` 与 `is_open()` 用于查询端口当前处于已连接还是重连中。
+
 ## 借用式异步 I/O
 
 常规的 `on_data()` 与 `async_write()` API 通过 Astrial 自有的存储让缓冲区所有权保持简单。若集成方已经拥有稳定的缓冲区，可使用借用式 API 避免这些用户态拷贝：
@@ -123,6 +143,8 @@ cmake -S . -B build -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_IO_URING=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+仅依赖硬件的串口检查位于 `tests/serial_hil.cpp`，由 `-DASTRIAL_BUILD_HIL_TESTS=ON` 启用。它们会注册到 CTest，但在夹具（fixture）缺失时以 77 退出（跳过），因此默认的测试运行永远不需要硬件。伪终端能够复现的部分都由上面的常规测试覆盖；伪终端无法反映的检查（校验使能、数据位、调制解调器线、break、RS-485、行错误计数）留给硬件验证。
 
 物理 USB 生命周期检查刻意与 CTest 分离，这样即使开发者机器上没有目标设备，也不会导致常规 CI 失败。请显式构建 HIL 工具，然后将其指向一个 Vendor Bulk 接口：
 

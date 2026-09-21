@@ -31,3 +31,22 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     add_test(NAME astrial_virtual_serial COMMAND astrial_virtual_serial_tests)
     set_tests_properties(astrial_virtual_serial PROPERTIES TIMEOUT 15)
 endif ()
+
+# Hardware-in-the-loop tests need a physical fixture. They are built and
+# registered only when ASTRIAL_BUILD_HIL_TESTS=ON, and they exit with 77 (test
+# skipped) whenever the required environment/fixture is missing.
+if (ASTRIAL_BUILD_HIL_TESTS)
+    add_executable(astrial_serial_hil serial_hil.cpp)
+    target_link_libraries(astrial_serial_hil PRIVATE astrial)
+    target_compile_features(astrial_serial_hil PRIVATE cxx_std_20)
+    if (MSVC)
+        target_compile_options(astrial_serial_hil PRIVATE /W4)
+    elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(astrial_serial_hil PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif ()
+    add_test(NAME astrial_serial_hil COMMAND astrial_serial_hil)
+    set_tests_properties(astrial_serial_hil PROPERTIES
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77)
+endif ()

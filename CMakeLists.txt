@@ -26,6 +26,8 @@ option(ASTRIAL_IO_URING "Try enabling io_uring backend for Astrial library" ON)
 option(ASTRIAL_BUILD_USB "Build the optional libusb bulk transport" OFF)
 option(ASTRIAL_BUILD_USB_HIL
     "Build physical USB lifecycle HIL tools (not registered with CTest)" OFF)
+option(ASTRIAL_BUILD_HIL_TESTS
+    "Build and register CTest entries that need physical serial/USB hardware; they skip when the fixture is absent" OFF)
 option(ASTRIAL_USB_STATS
     "Expose USB bulk transfer statistics counters for performance analysis" OFF)
 set(ASTRIAL_USB_READ_QUEUE_DEPTH "8" CACHE STRING
@@ -33,6 +35,10 @@ set(ASTRIAL_USB_READ_QUEUE_DEPTH "8" CACHE STRING
 
 if(ASTRIAL_BUILD_USB_HIL AND NOT ASTRIAL_BUILD_USB)
     message(FATAL_ERROR "ASTRIAL_BUILD_USB_HIL requires ASTRIAL_BUILD_USB=ON")
+endif()
+
+if(ASTRIAL_BUILD_HIL_TESTS AND NOT ASTRIAL_BUILD_TESTS)
+    message(FATAL_ERROR "ASTRIAL_BUILD_HIL_TESTS requires ASTRIAL_BUILD_TESTS=ON")
 endif()
 
 if(ASTRIAL_BUILD_TESTS)

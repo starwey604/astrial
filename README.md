@@ -20,6 +20,29 @@ surface, two transports:
   from the parent registry chain.
 - Windows enumerates present COM ports through SetupAPI.
 
+## Serial configuration and runtime control
+
+```cpp
+auto serial = Serial::builder()
+    .baud_rate(115200)
+    .data_bits(DataBits::Eight)
+    .parity(Parity::None)
+    .stop_bits(StopBits::One)
+    .flow_control(FlowControl::Hardware) // None | Software | Hardware
+    .auto_reconnect(true)
+    .open("/dev/ttyACM0")
+    .value();
+
+serial.set_baud_rate(921600); // reconfigures the open port in place
+serial.set_flow_control(FlowControl::None);
+if (serial.is_open()) { /* state() == SerialState::Connected */ }
+```
+
+The runtime setters return `tl::expected<void, std::error_code>`, run on the I/O
+thread, and update the stored settings so an automatic reconnect reopens with
+them. `state()` and `is_open()` report whether the port is connected or
+reconnecting.
+
 ## Borrowed asynchronous I/O
 
 The regular `on_data()` and `async_write()` APIs keep buffer ownership simple
@@ -169,6 +192,13 @@ cmake -S . -B build -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_IO_URING=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+Hardware-only serial checks live in `tests/serial_hil.cpp`, gated behind
+`-DASTRIAL_BUILD_HIL_TESTS=ON`. They are registered with CTest but exit with 77
+(skipped) until a fixture is present, so the default test run never needs
+hardware. Anything a pseudo-terminal can reproduce is covered by the ordinary
+tests above; the checks a PTY cannot reflect (parity enable, character size,
+modem lines, break, RS-485, line-error counters) are left to hardware.
 
 Physical USB lifecycle checks are deliberately separate from CTest so a
 developer machine without the selected device never fails ordinary CI. Build
