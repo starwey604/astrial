@@ -27,6 +27,12 @@ SerialBuilder& SerialBuilder::data_bits(const DataBits data_bits)
     return *this;
 }
 
+SerialBuilder& SerialBuilder::flow_control(const FlowControl flow_control)
+{
+    m_flow_control = flow_control;
+    return *this;
+}
+
 SerialBuilder& SerialBuilder::auto_reconnect(const bool enable, std::chrono::milliseconds interval)
 {
     m_auto_reconnect = enable;

@@ -19,6 +19,7 @@ public:
     Parity m_parity{};
     StopBits m_stop_bits{};
     DataBits m_data_bits{DataBits::Eight};
+    FlowControl m_flow_control{FlowControl::None};
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> m_work_guard;
 
     asio::steady_timer m_reconnect_timer;
@@ -191,7 +192,8 @@ public:
 
             // try re-opening port
             (void)detail::try_configure_port(m_port, m_port_name, m_baud_rate,
-                                             m_parity, m_stop_bits, m_data_bits)
+                                             m_parity, m_stop_bits, m_data_bits,
+                                             m_flow_control)
                  .or_else([this](auto&&) { schedule_reconnect(); }) // failed, try later
                  .and_then([this]() -> tl::expected<void, std::error_code>
                   {
@@ -355,6 +357,69 @@ public:
                           }
         );
     }
+
+    // Runs a configuration change on the I/O thread. Called from that thread
+    // (for example inside a callback) it executes inline to avoid a deadlock.
+    tl::expected<void, std::error_code> run_on_context(
+        std::function<tl::expected<void, std::error_code>()> task)
+    {
+        if (m_is_closed_by_user.load(std::memory_order_acquire) || !m_thread.joinable())
+        {
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        }
+        if (std::this_thread::get_id() == m_thread.get_id())
+        {
+            return task();
+        }
+
+        auto state = std::make_shared<SyncWriteState>();
+        auto future = state->promise.get_future();
+        asio::post(m_ctx, [task = std::move(task), state]() mutable
+        {
+            state->promise.set_value(task());
+        });
+        return future.get();
+    }
+
+    tl::expected<void, std::error_code> apply_baud_rate(uint32_t rate)
+    {
+        if (!m_port.is_open()) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        auto result = detail::set_baud_rate(m_port, rate);
+        if (result) m_baud_rate = rate;
+        return result;
+    }
+
+    tl::expected<void, std::error_code> apply_parity(Parity parity)
+    {
+        if (!m_port.is_open()) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        auto result = detail::set_parity(m_port, parity);
+        if (result) m_parity = parity;
+        return result;
+    }
+
+    tl::expected<void, std::error_code> apply_stop_bits(StopBits stop_bits)
+    {
+        if (!m_port.is_open()) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        auto result = detail::set_stop_bits(m_port, stop_bits);
+        if (result) m_stop_bits = stop_bits;
+        return result;
+    }
+
+    tl::expected<void, std::error_code> apply_data_bits(DataBits data_bits)
+    {
+        if (!m_port.is_open()) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        auto result = detail::set_data_bits(m_port, data_bits);
+        if (result) m_data_bits = data_bits;
+        return result;
+    }
+
+    tl::expected<void, std::error_code> apply_flow_control(FlowControl flow_control)
+    {
+        if (!m_port.is_open()) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        auto result = detail::set_flow_control(m_port, flow_control);
+        if (result) m_flow_control = flow_control;
+        return result;
+    }
 };
 
 tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view name) const
@@ -362,7 +427,8 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     Serial serial;
     auto& impl = *serial.m_impl;
 
-    auto result = detail::try_configure_port(impl.m_port, name, m_rate, m_parity, m_stop_bits, m_data_bits);
+    auto result = detail::try_configure_port(impl.m_port, name, m_rate, m_parity, m_stop_bits,
+                                             m_data_bits, m_flow_control);
     if (!result) return tl::make_unexpected(result.error());
 
     // other param
@@ -371,6 +437,7 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     impl.m_parity = m_parity;
     impl.m_stop_bits = m_stop_bits;
     impl.m_data_bits = m_data_bits;
+    impl.m_flow_control = m_flow_control;
     impl.m_auto_reconnect = m_auto_reconnect;
     impl.m_reconnect_interval = m_reconnect_interval;
 
@@ -404,6 +471,45 @@ SerialBuilder Serial::builder()
 Serial::~Serial() = default;
 Serial::Serial(Serial&&) noexcept = default;
 Serial& Serial::operator=(Serial&&) noexcept = default;
+
+bool Serial::is_open() const noexcept
+{
+    return state() == SerialState::Connected;
+}
+
+SerialState Serial::state() const noexcept
+{
+    return m_impl ? m_impl->m_state.load(std::memory_order_acquire)
+                  : SerialState::Disconnected;
+}
+
+tl::expected<void, std::error_code> Serial::set_baud_rate(const uint32_t rate)
+{
+    return m_impl->run_on_context([this, rate] { return m_impl->apply_baud_rate(rate); });
+}
+
+tl::expected<void, std::error_code> Serial::set_parity(const Parity parity)
+{
+    return m_impl->run_on_context([this, parity] { return m_impl->apply_parity(parity); });
+}
+
+tl::expected<void, std::error_code> Serial::set_stop_bits(const StopBits stop_bits)
+{
+    return m_impl->run_on_context([this, stop_bits] { return m_impl->apply_stop_bits(stop_bits); });
+}
+
+tl::expected<void, std::error_code> Serial::set_data_bits(const DataBits data_bits)
+{
+    return m_impl->run_on_context([this, data_bits] { return m_impl->apply_data_bits(data_bits); });
+}
+
+tl::expected<void, std::error_code> Serial::set_flow_control(const FlowControl flow_control)
+{
+    return m_impl->run_on_context([this, flow_control]
+    {
+        return m_impl->apply_flow_control(flow_control);
+    });
+}
 
 void Serial::on_data(std::function<void(std::span<const uint8_t>)> callback)
 {

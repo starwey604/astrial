@@ -19,6 +19,7 @@ public:
     SerialBuilder& parity(Parity parity);
     SerialBuilder& stop_bits(StopBits stop_bits);
     SerialBuilder& data_bits(DataBits data_bits);
+    SerialBuilder& flow_control(FlowControl flow_control);
     SerialBuilder& auto_reconnect(bool enable, std::chrono::milliseconds interval = std::chrono::seconds(2));
 
     tl::expected<Serial, std::error_code> open(std::string_view name) const;
@@ -29,6 +30,7 @@ private:
     Parity m_parity{};
     StopBits m_stop_bits{};
     DataBits m_data_bits{DataBits::Eight};
+    FlowControl m_flow_control{FlowControl::None};
     bool m_auto_reconnect = true;
     std::chrono::milliseconds m_reconnect_interval = std::chrono::seconds(2);
 };

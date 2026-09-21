@@ -11,6 +11,8 @@ enum class StopBits { One, OnePointFive, Two };
 
 enum class DataBits { Five = 5, Six = 6, Seven = 7, Eight = 8 };
 
+enum class FlowControl { None, Software, Hardware };
+
 struct SerialInfo
 {
     std::string port_name;

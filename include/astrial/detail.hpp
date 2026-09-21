@@ -25,9 +25,11 @@ namespace detail
     tl::expected<void, std::error_code> set_parity(asio::serial_port& port, Parity parity);
     tl::expected<void, std::error_code> set_stop_bits(asio::serial_port& port, StopBits stop_bits);
     tl::expected<void, std::error_code> set_data_bits(asio::serial_port& port, DataBits data_bits);
+    tl::expected<void, std::error_code> set_flow_control(asio::serial_port& port, FlowControl flow_control);
     tl::expected<void, std::error_code> try_configure_port(asio::serial_port& port, std::string_view name,
                                                            uint32_t rate, Parity parity,
-                                                           StopBits stop_bits, DataBits data_bits);
+                                                           StopBits stop_bits, DataBits data_bits,
+                                                           FlowControl flow_control);
 }
 
 #endif //ASTRIAL_DETAIL_HPP

@@ -21,6 +21,20 @@ public:
     static SerialBuilder builder();
     static std::vector<SerialInfo> list_ports();
 
+    // True while the port is open and connected. During automatic reconnect the
+    // transport is closed, so is_open() is false and state() is Reconnecting.
+    [[nodiscard]] bool is_open() const noexcept;
+    [[nodiscard]] SerialState state() const noexcept;
+
+    // Runtime reconfiguration. Applied on the I/O thread while the port is
+    // open, and stored so an automatic reconnect reopens with the new settings.
+    // Returns DeviceDisconnected when the port is not open.
+    tl::expected<void, std::error_code> set_baud_rate(uint32_t rate);
+    tl::expected<void, std::error_code> set_parity(Parity parity);
+    tl::expected<void, std::error_code> set_stop_bits(StopBits stop_bits);
+    tl::expected<void, std::error_code> set_data_bits(DataBits data_bits);
+    tl::expected<void, std::error_code> set_flow_control(FlowControl flow_control);
+
     ~Serial();
 
     Serial(const Serial&) = delete;

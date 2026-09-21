@@ -124,14 +124,35 @@ namespace detail
         return {};
     }
 
+    tl::expected<void, std::error_code> set_flow_control(asio::serial_port& port, FlowControl flow_control)
+    {
+        asio::serial_port_base::flow_control::type asio_flow;
+        switch (flow_control)
+        {
+        case FlowControl::Software: asio_flow = asio::serial_port_base::flow_control::software;
+            break;
+        case FlowControl::Hardware: asio_flow = asio::serial_port_base::flow_control::hardware;
+            break;
+        default: asio_flow = asio::serial_port_base::flow_control::none;
+            break;
+        }
+
+        asio::error_code ec;
+        port.set_option(asio::serial_port_base::flow_control(asio_flow), ec);
+        if (ec) return tl::make_unexpected(ec);
+        return {};
+    }
+
     tl::expected<void, std::error_code> try_configure_port(asio::serial_port& port, std::string_view name,
                                                            uint32_t rate, Parity parity,
-                                                           StopBits stop_bits, DataBits data_bits)
+                                                           StopBits stop_bits, DataBits data_bits,
+                                                           FlowControl flow_control)
     {
         return try_open(port, name)
               .and_then([&] { return set_baud_rate(port, rate); })
               .and_then([&] { return set_parity(port, parity); })
               .and_then([&] { return set_stop_bits(port, stop_bits); })
-              .and_then([&] { return set_data_bits(port, data_bits); });
+              .and_then([&] { return set_data_bits(port, data_bits); })
+              .and_then([&] { return set_flow_control(port, flow_control); });
     }
 }
