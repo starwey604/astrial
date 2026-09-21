@@ -28,6 +28,8 @@ option(ASTRIAL_BUILD_USB_HIL
     "Build physical USB lifecycle HIL tools (not registered with CTest)" OFF)
 option(ASTRIAL_USB_STATS
     "Expose USB bulk transfer statistics counters for performance analysis" OFF)
+set(ASTRIAL_USB_READ_QUEUE_DEPTH "8" CACHE STRING
+    "Default number of in-flight USB bulk IN transfers (1..32)")
 
 if(ASTRIAL_BUILD_USB_HIL AND NOT ASTRIAL_BUILD_USB)
     message(FATAL_ERROR "ASTRIAL_BUILD_USB_HIL requires ASTRIAL_BUILD_USB=ON")
@@ -118,6 +120,13 @@ if (ASTRIAL_BUILD_USB)
     target_compile_features(astrial_usb PUBLIC cxx_std_20)
     _astrial_configure_ipo(astrial_usb)
     target_compile_definitions(astrial_usb PUBLIC ASTRIAL_HAS_USB=1)
+    if (ASTRIAL_USB_READ_QUEUE_DEPTH LESS 1 OR ASTRIAL_USB_READ_QUEUE_DEPTH GREATER 32)
+        message(FATAL_ERROR "ASTRIAL_USB_READ_QUEUE_DEPTH must be between 1 and 32")
+    endif ()
+    # PUBLIC because UsbBulkConfig's default member initializer is part of the
+    # public header, so consumers must see the same value as the library build.
+    target_compile_definitions(astrial_usb PUBLIC
+        ASTRIAL_USB_READ_QUEUE_DEPTH=${ASTRIAL_USB_READ_QUEUE_DEPTH})
     # Statistics counters are opt-in. The macro is PUBLIC because it gates the
     # public UsbBulkStats type and UsbBulkDevice::stats(), so consumers must see
     # the same definition as the library build. The HIL tool asserts on stats, so

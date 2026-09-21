@@ -16,6 +16,12 @@
 
 #include <tl/expected.hpp>
 
+// Default number of in-flight IN transfers. The ASTRIAL_USB_READ_QUEUE_DEPTH
+// CMake option (1..32) overrides this value.
+#if !defined(ASTRIAL_USB_READ_QUEUE_DEPTH)
+#  define ASTRIAL_USB_READ_QUEUE_DEPTH 8
+#endif
+
 enum class UsbError
 {
     Success = 0,
@@ -66,7 +72,7 @@ struct UsbBulkConfig
 {
     UsbDeviceSelector device;
     UsbBulkInterface bulk_interface;
-    std::size_t read_queue_depth{2};
+    std::size_t read_queue_depth{ASTRIAL_USB_READ_QUEUE_DEPTH};
     bool auto_detach_kernel_driver{true};
     bool auto_reconnect{true};
     std::chrono::milliseconds reconnect_interval{500};

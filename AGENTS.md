@@ -26,6 +26,9 @@ cmake --build build
   PUBLIC, which is what makes `astrial.hpp` expose `Usb.hpp`.
 - `-DASTRIAL_BUILD_USB_HIL=ON` builds the physical USB lifecycle test tool; it
   requires `-DASTRIAL_BUILD_USB=ON` and is not registered with CTest.
+- `-DASTRIAL_USB_READ_QUEUE_DEPTH=<n>` (default 8, range 1..32) sets the default
+  `UsbBulkConfig::read_queue_depth` (in-flight USB bulk IN transfers); it is a
+  PUBLIC definition on `astrial::usb` because the header uses it.
 - `-DASTRIAL_USB_STATS=ON` exposes `UsbBulkStats` / `UsbBulkDevice::stats()` and
   collects counters; it is OFF by default, in which case the counters and the
   public API are compiled out and the hot path does no atomic RMW. The

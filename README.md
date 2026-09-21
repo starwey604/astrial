@@ -110,7 +110,8 @@ data path. The counters are opt-in: configure with `-DASTRIAL_USB_STATS=ON`,
 otherwise `UsbBulkStats` and `stats()` are compiled out and the hot path skips
 the atomic updates entirely.
 
-Two IN transfers are queued by default. Their payloads land directly in the
+Eight IN transfers are queued by default; configure the count with
+`-DASTRIAL_USB_READ_QUEUE_DEPTH=N` (1..32). Their payloads land directly in the
 buffers returned by `acquire_rx_buffer`; returning an empty buffer applies
 backpressure until `resume_reads()` is called. A token may identify the owner
 of each borrowed span. Providers and completion callbacks execute on Astrial's
