@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+
+# Application-level Kconfig for the Astrial USB enumeration firmware.
+# Deliberately self-contained: this app does not use the Zephyr tree's
+# samples/subsys/usb/common Kconfig (sample_usbd).
+
+menu "Astrial USB test options"
+	depends on USB_DEVICE_STACK_NEXT
+
+config ASTRIAL_USB_VID
+	hex "USB Vendor ID"
+	default 0x2fe3
+	help
+	  Vendor ID the firmware enumerates with. The astrial HIL tools
+	  default to 0x2fe3:0x574c, so keep these in sync unless you have
+	  a reason not to. 0x2fe3 is the Zephyr Project VID: acceptable
+	  for a lab fixture, never for anything that ships.
+
+config ASTRIAL_USB_PID
+	hex "USB Product ID"
+	default 0x574c
+	help
+	  Product ID the firmware enumerates with. Match the default of
+	  tests/usb_lifecycle_hil.
+
+config ASTRIAL_USB_MANUFACTURER
+	string "Manufacturer string"
+	default "Astrial"
+
+config ASTRIAL_USB_PRODUCT
+	string "Product string"
+	default "Astrial USB Bulk Test"
+
+endmenu
+
+source "Kconfig.zephyr"
