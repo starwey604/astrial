@@ -415,7 +415,8 @@ public:
     }
 
     tl::expected<void, std::error_code>
-    async_write_borrowed(std::span<const uint8_t> data, WriteCallback callback)
+    async_write_borrowed(std::span<const uint8_t> data, WriteCallback callback,
+                         UsbWriteOptions options)
     {
         if (data.size() > static_cast<std::size_t>(INT_MAX))
         {
@@ -441,7 +442,7 @@ public:
 
         m_write_callback = std::move(callback);
         m_write_size = data.size();
-        m_write_needs_zlp = !data.empty() &&
+        m_write_needs_zlp = options.append_zero_length_packet && !data.empty() &&
                             m_endpoint_info.maximum_packet_size_out > 0 &&
                             data.size() % m_endpoint_info.maximum_packet_size_out == 0;
         m_write_zlp_phase = false;
@@ -1176,13 +1177,14 @@ void UsbBulkDevice::resume_reads()
 }
 
 tl::expected<void, std::error_code>
-UsbBulkDevice::async_write_borrowed(std::span<const uint8_t> data, WriteCallback callback)
+UsbBulkDevice::async_write_borrowed(std::span<const uint8_t> data,
+                                    WriteCallback callback, UsbWriteOptions options)
 {
     if (!m_impl)
     {
         return tl::make_unexpected(make_error_code(UsbError::DeviceDisconnected));
     }
-    return m_impl->async_write_borrowed(data, std::move(callback));
+    return m_impl->async_write_borrowed(data, std::move(callback), options);
 }
 
 void UsbBulkDevice::on_disconnect(std::function<void(const std::error_code&)> callback)

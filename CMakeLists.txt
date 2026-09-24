@@ -25,7 +25,7 @@ option(ASTRIAL_ENABLE_IPO "Enable IPO for optimized Astrial configurations" ON)
 option(ASTRIAL_IO_URING "Try enabling io_uring backend for Astrial library" ON)
 option(ASTRIAL_BUILD_USB "Build the optional libusb bulk transport" OFF)
 option(ASTRIAL_BUILD_USB_HIL
-    "Build physical USB lifecycle HIL tools (not registered with CTest)" OFF)
+    "Build physical USB HIL tools (not registered with CTest)" OFF)
 option(ASTRIAL_BUILD_HIL_TESTS
     "Build and register CTest entries that need physical serial/USB hardware; they skip when the fixture is absent" OFF)
 option(ASTRIAL_USB_STATS

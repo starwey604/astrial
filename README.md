@@ -178,9 +178,17 @@ device.start_reads_borrowed(
 applies the read loop's backpressure automatically.
 
 `async_write_borrowed()` similarly keeps the caller's memory in place until
-completion. Astrial sends an explicit zero-length packet when a non-empty OUT
-transfer is an exact endpoint-packet multiple, including on platforms where
-libusb's automatic ZLP flag is unavailable.
+completion. By default it sends exactly the payload. Some device protocols use
+a short packet to end a logical message; for those, request a zero-length
+packet when the payload is an exact endpoint-packet multiple:
+
+```cpp
+device.async_write_borrowed(bytes, on_complete,
+                            {.append_zero_length_packet = true});
+```
+
+This choice belongs to the device protocol. Astrial submits the extra packet
+explicitly so the option works across libusb backends.
 
 ## Tests
 

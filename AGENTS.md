@@ -24,8 +24,9 @@ cmake --build build
   manifest feature `usb` (`vcpkg.json`, pinned baseline) instead of a global
   libusb install. The target links `LibUSB::LibUSB` and sets `ASTRIAL_HAS_USB=1`
   PUBLIC, which is what makes `astrial.hpp` expose `Usb.hpp`.
-- `-DASTRIAL_BUILD_USB_HIL=ON` builds the physical USB lifecycle test tool; it
-  requires `-DASTRIAL_BUILD_USB=ON` and is not registered with CTest.
+- `-DASTRIAL_BUILD_USB_HIL=ON` builds the physical USB lifecycle, latency, and
+  throughput test tools; it requires `-DASTRIAL_BUILD_USB=ON` and the tools
+  are not registered with CTest.
 - `-DASTRIAL_BUILD_HIL_TESTS=ON` (default OFF) builds and registers the
   hardware-in-the-loop CTest entries. They exit with 77 (CTest "skipped") when
   the required fixture/environment is absent, so an ordinary machine stays
@@ -135,7 +136,9 @@ device.start_reads_borrowed(acquire_rx_buffer, on_read);
   handle-independent set of page-aligned buffers for the borrowed provider;
   `acquire()` returns empty when exhausted to apply backpressure.
 - `async_write_borrowed()` is the only write path; one write may be in flight
-  and the caller's memory must stay alive until its callback.
+  and the caller's memory must stay alive until its callback. It sends no
+  implicit ZLP; pass `UsbWriteOptions{.append_zero_length_packet = true}` when
+  the device protocol requires a short packet at a packet-size boundary.
 - Providers and callbacks run on the libusb event thread. In borrowed mode
   `resume_reads()` is needed after a provider returns an empty buffer
   (backpressure); the owned mode has no provider and no backpressure.

@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 
+#include <string.h>
 #include <zephyr/drivers/usb/udc.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net_buf.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/usb/usbd.h>
+
+#include "../protocol.h"
 
 LOG_MODULE_REGISTER(astrial_bulk_echo, LOG_LEVEL_INF);
 
@@ -121,6 +125,17 @@ static int request_done(struct usbd_class_data *c_data,
 	}
 
 	if (ep == BULK_OUT && buf->len != 0) {
+		if (buf->len >= ASTRIAL_USB_TIMING_HEADER_SIZE &&
+		    memcmp(buf->data, ASTRIAL_USB_TIMING_MAGIC,
+			   ASTRIAL_USB_TIMING_MAGIC_SIZE) == 0) {
+			uint64_t out_cycles = k_cycle_get_64();
+			sys_put_le64(out_cycles, buf->data + 8);
+			sys_put_le32(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC,
+				     buf->data + 24);
+			sys_put_le32(ASTRIAL_USB_TIMING_VERSION,
+				     buf->data + 28);
+			sys_put_le64(k_cycle_get_64(), buf->data + 16);
+		}
 		/* Return exactly the bytes received; the host checks every byte. */
 		info->ep = BULK_IN;
 		rc = usbd_ep_enqueue(c_data, buf);

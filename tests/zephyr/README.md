@@ -123,10 +123,17 @@ cd ~/zephyrproject
 cd ~/codings/astrial
 cmake -B build -DASTRIAL_BUILD_USB=ON -DASTRIAL_BUILD_USB_HIL=ON \
     -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target astrial_usb_latency_hil astrial_usb_throughput_hil
+cmake --build build --target astrial_usb_latency_hil astrial_usb_throughput_hil \
+    astrial_usb_latency_raw_hil
 ./build/tests/astrial_usb_latency_hil --size 64 --rounds 300 --warmup 20
 ./build/tests/astrial_usb_throughput_hil --size 65536 --rounds 64 --warmup 4
 ./build/tests/astrial_usb_throughput_hil --size 1048576 --rounds 16 --warmup 2
+# 时间戳剖析：同一固件上的 Astrial 与原生 libusb 对照
+./build/tests/astrial_usb_latency_hil --profile --size 64 --rounds 2000 --warmup 100
+./build/tests/astrial_usb_latency_raw_hil --size 64 --rounds 2000 --warmup 100
+# 固件的 4096 B OUT 缓冲区可以在满缓冲后回显，无需 ZLP；需要时显式选用
+./build/tests/astrial_usb_latency_hil --size 4096 --rounds 500 --warmup 25
+./build/tests/astrial_usb_latency_hil --size 4096 --rounds 500 --warmup 25 --zlp
 ```
 
 延迟是调用 `async_write_borrowed()` 前到收到完整回显的往返时间
@@ -135,6 +142,10 @@ cmake --build build --target astrial_usb_latency_hil astrial_usb_throughput_hil
 它是全双工往返测试的吞吐，不是单向 USB 链路上限。每轮只允许一笔写入，
 当前固件一次只处理一个 4096 字节块，因此结果还包含宿主和固件的调度开销。
 上述工具只在 `ASTRIAL_BUILD_USB_HIL=ON` 时构建，均不加入 CTest。
+`--profile` 使用 32 字节诊断头，固件写入 OUT 回调与 IN 提交前的本地
+周期计数及频率；宿主只计算两个设备时间戳之差，不把两个设备的时钟
+直接相减。原生 libusb 工具用相同的 64 字节请求和预先提交的 IN 传输，
+作为 Astrial 路径的近似基线。
 
 ### 2026-09-24 实测
 
@@ -142,6 +153,7 @@ cmake --build build --target astrial_usb_latency_hil astrial_usb_throughput_hil
 Linux xHCI（经 USB 2.0 hub）、Astrial Release 构建。设备以
 `2fe3:574d`、High Speed（480 Mbps）枚举。每组重复 3 次；表中列出
 三次结果的范围，预热轮次不计入统计。所有轮次的回显字节均通过校验。
+此表是首轮固件与自动补 ZLP 的基准记录；下文另列修改后的复查。
 
 | 测试 | 每次运行 | RTT p50 | RTT p99 | 有效吞吐 |
 |---|---:|---:|---:|---:|
@@ -153,6 +165,28 @@ Linux xHCI（经 USB 2.0 hub）、Astrial Release 构建。设备以
 带宽。若宿主程序报告 `permission denied`，需给当前 `2fe3:574d` 对应
 的 `/dev/bus/usb/BBB/DDD` 节点授予读写权限；节点号在每次重新枚举后
 可能改变。
+
+### 延迟归因与 ZLP 复查
+
+同一台主机与固件上，64 B、每组 2000 轮、交替运行 3 组：原生 libusb
+RTT p50 为 71.27–71.76 µs，Astrial 为 74.85–74.86 µs；固件 OUT
+回调到 IN 提交前的 p50 为 0.92 µs。写完成回调 p50 分别为
+31.37–32.15 µs 和 35.67–36.19 µs。两种宿主程序的读请求重挂与
+线程同步实现不同，因此 3–4 µs 差距是近似对照，不是严格隔离出的
+Astrial 净开销。尝试在 Astrial 读完成回调内立即重挂时，RTT p50 为
+74.25–74.81 µs，和原有范围重叠；未保留这项并发路径改动。
+
+4096 B 请求在本固件上不补 ZLP 也能正确回显。交替运行 3 组、每组
+500 轮：不补 ZLP 的 RTT p50 为 236.20–237.09 µs、吞吐
+15.45–15.56 MiB/s；补 ZLP 的 p50 为 250.18–253.03 µs、吞吐
+13.07–13.22 MiB/s。512 B 请求在固件的 4096 B
+OUT 缓冲区上则需要短包终止，显式 `--zlp` 测得 p50 116.97 µs。
+这表明 ZLP 由设备接收策略和上层消息边界决定，Astrial 默认不添加，
+调用方可通过 `UsbWriteOptions` 逐笔选择。[libusb 对 ZLP 的说明](https://libusb.sourceforge.io/api-1.0/group__libusb__asyncio.html)
+也将其描述为设备协议需要短包结束逻辑请求时使用的选项。
+改为默认不补 ZLP 并保留原有读重挂路径后，最终复查得到 64 B RTT
+p50 74.64 µs、1 MiB 回显吞吐 15.35 MiB/s；`512 B --zlp`、
+USB lifecycle HIL（2 轮）与常规 CTest 均通过。
 
 ## 故障排查
 

@@ -126,6 +126,14 @@ struct UsbReadBufferInfo
     bool zero_copy{};
 };
 
+struct UsbWriteOptions
+{
+    // Append a zero-length OUT packet when the payload ends on a USB packet
+    // boundary. Enable this only when the device protocol requires a short
+    // packet to end a logical message. The default sends payload only.
+    bool append_zero_length_packet{};
+};
+
 enum class UsbState { Disconnected, Connected, Reconnecting, Closed };
 
 class UsbBulkDevice
@@ -166,9 +174,12 @@ public:
     void resume_reads();
 
     // The caller owns data until callback completion. Only one write may be
-    // active; InterfaceBusy means the request was not accepted.
+    // active; InterfaceBusy means the request was not accepted. USB bulk does
+    // not define message boundaries; choose ZLP behavior for the device's
+    // protocol rather than relying on the payload contents.
     tl::expected<void, std::error_code>
-    async_write_borrowed(std::span<const uint8_t> data, WriteCallback callback);
+    async_write_borrowed(std::span<const uint8_t> data, WriteCallback callback,
+                         UsbWriteOptions options = {});
 
     void on_disconnect(std::function<void(const std::error_code&)> callback);
     void on_reconnect(std::function<void()> callback);

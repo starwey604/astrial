@@ -21,16 +21,22 @@ if (TARGET astrial_usb)
                 target_compile_definitions(astrial_usb_${mode}_hil PRIVATE ASTRIAL_USB_LATENCY_TEST=1)
             endif ()
         endforeach ()
+        add_executable(astrial_usb_latency_raw_hil usb_latency_raw_hil.cpp)
+        target_link_libraries(astrial_usb_latency_raw_hil PRIVATE LibUSB::LibUSB)
+        target_compile_features(astrial_usb_latency_raw_hil PRIVATE cxx_std_20)
         if (MSVC)
             target_compile_options(astrial_usb_lifecycle_hil PRIVATE /W4)
             target_compile_options(astrial_usb_latency_hil PRIVATE /W4)
             target_compile_options(astrial_usb_throughput_hil PRIVATE /W4)
+            target_compile_options(astrial_usb_latency_raw_hil PRIVATE /W4)
         elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             target_compile_options(astrial_usb_lifecycle_hil PRIVATE
                 -Wall -Wextra -Wpedantic)
             target_compile_options(astrial_usb_latency_hil PRIVATE
                 -Wall -Wextra -Wpedantic)
             target_compile_options(astrial_usb_throughput_hil PRIVATE
+                -Wall -Wextra -Wpedantic)
+            target_compile_options(astrial_usb_latency_raw_hil PRIVATE
                 -Wall -Wextra -Wpedantic)
         endif ()
     endif ()
