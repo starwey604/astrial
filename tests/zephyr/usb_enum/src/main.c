@@ -18,6 +18,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/usb/usbd.h>
+#include <errno.h>
 
 LOG_MODULE_REGISTER(astrial_usb_enum, LOG_LEVEL_INF);
 
@@ -55,7 +56,7 @@ static void enum_msg_cb(struct usbd_context *const ctx,
 	if (msg->type == USBD_MSG_VBUS_READY) {
 		int err = usbd_enable(ctx);
 
-		if (err != 0) {
+		if (err != 0 && err != -EALREADY) {
 			LOG_ERR("usbd_enable failed: %d", err);
 		}
 	}
@@ -72,10 +73,10 @@ int main(void)
 	ASTRIAL_TRY(usbd_add_descriptor(&astrial_usbd, &product));
 
 	/*
-	 * Loopback is a single vendor interface without an IAD, so the
-	 * device descriptor must defer the class code to the interface
-	 * descriptors (0/0/0 instead of the Miscellaneous triple that
-	 * USBD_DEVICE_DEFINE preloads).
+	 * Zephyr's loopback class exposes three vendor interfaces under an IAD.
+	 * Interface 0 carries the bulk endpoints used by astrial::usb. Keep
+	 * the device-level class code at zero so the host reads the interface
+	 * descriptors for the function class.
 	 */
 	if (USBD_SUPPORTS_HIGH_SPEED &&
 	    usbd_caps_speed(&astrial_usbd) == USBD_SPEED_HS) {
@@ -100,15 +101,14 @@ int main(void)
 	ASTRIAL_TRY(usbd_msg_register_cb(&astrial_usbd, enum_msg_cb));
 	ASTRIAL_TRY(usbd_init(&astrial_usbd));
 
-	/*
-	 * When the controller cannot sense VBUS there is no event to wait
-	 * for, enable right away; otherwise enum_msg_cb does it on
-	 * USBD_MSG_VBUS_READY.
-	 */
-	if (!usbd_can_detect_vbus(&astrial_usbd)) {
-		ASTRIAL_TRY(usbd_enable(&astrial_usbd));
-		LOG_INF("USB device support enabled (no VBUS detection)");
+	/* The EHCI driver may miss VBUS_READY when J11 is already connected. */
+	int err = usbd_enable(&astrial_usbd);
+
+	if (err != 0 && err != -EALREADY) {
+		LOG_ERR("usbd_enable failed: %d", err);
+		return err;
 	}
+	LOG_INF("USB device support enabled");
 
 	LOG_INF("Astrial USB enum check ready: %04x:%04x",
 		CONFIG_ASTRIAL_USB_VID, CONFIG_ASTRIAL_USB_PID);
