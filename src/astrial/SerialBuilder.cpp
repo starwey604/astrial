@@ -39,3 +39,15 @@ SerialBuilder& SerialBuilder::auto_reconnect(const bool enable, std::chrono::mil
     m_reconnect_interval = std::move(interval);
     return *this;
 }
+
+SerialBuilder& SerialBuilder::data_terminal_ready(bool asserted)
+{
+    m_dtr = asserted;
+    return *this;
+}
+
+SerialBuilder& SerialBuilder::request_to_send(bool asserted)
+{
+    m_rts = asserted;
+    return *this;
+}

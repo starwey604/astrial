@@ -1,6 +1,7 @@
 #include <astrial/Serial.hpp>
 #include <astrial/SerialBuilder.hpp>
 #include <astrial/detail.hpp>
+#include "serial_control.hpp"
 
 #include <asio.hpp>
 #include <memory_resource>
@@ -8,6 +9,10 @@
 #include <queue>
 #include <thread>
 #include <future>
+#include <mutex>
+#include <optional>
+#include <type_traits>
+#include <utility>
 
 class Serial::Impl
 {
@@ -23,6 +28,19 @@ public:
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> m_work_guard;
 
     asio::steady_timer m_reconnect_timer;
+    asio::steady_timer m_pinout_timer;
+    asio::steady_timer m_break_timer;
+    std::mutex m_control_mutex; // command admission vs close/work-guard release
+    std::optional<bool> m_dtr;
+    std::optional<bool> m_rts;
+    bool m_break_enabled{false};
+    bool m_break_pulse_active{false};
+    ControlCallback m_break_callback;
+    uint64_t m_break_generation{};
+    PinoutCallback m_pinout_callback;
+    std::optional<PinoutSignals> m_pinout_baseline;
+    std::chrono::milliseconds m_pinout_interval{20};
+    uint64_t m_pinout_generation{};
 
     std::jthread m_thread;
     std::array<uint8_t, ASTRIAL_READ_BUFFER_LENGTH> m_rx_buffer{};
@@ -71,7 +89,8 @@ public:
     std::atomic<SerialState> m_state{SerialState::Disconnected};
     std::atomic<bool> m_is_closed_by_user{false};
 
-    Impl() : m_ctx(1), m_port(m_ctx), m_reconnect_timer(m_ctx)
+    Impl() : m_ctx(1), m_port(m_ctx), m_reconnect_timer(m_ctx),
+             m_pinout_timer(m_ctx), m_break_timer(m_ctx)
     {
     };
 
@@ -97,6 +116,7 @@ public:
     void close_on_context()
     {
         m_reconnect_timer.cancel();
+        auto break_callback = stop_controls();
 
         if (m_port.is_open())
         {
@@ -109,30 +129,25 @@ public:
         {
             drain_all_writes(asio::error::operation_aborted);
         }
+        if (break_callback) break_callback(asio::error::operation_aborted);
     }
 
     void close()
     {
-        const bool first_close = !m_is_closed_by_user.exchange(true, std::memory_order_acq_rel);
-
-        if (first_close)
+        const bool on_context = m_ctx.get_executor().running_in_this_thread();
+        bool close_inline = false;
         {
-            if (m_thread.joinable() && m_thread.get_id() == std::this_thread::get_id())
+            std::lock_guard lock(m_control_mutex);
+            const bool first_close = !m_is_closed_by_user.exchange(true, std::memory_order_acq_rel);
+            if (first_close)
             {
-                close_on_context();
+                if (on_context || !m_thread.joinable()) close_inline = true;
+                else asio::post(m_ctx, [this] { close_on_context(); });
             }
-            else if (m_thread.joinable())
-            {
-                asio::post(m_ctx, [this] { close_on_context(); });
-            }
-            else
-            {
-                close_on_context();
-            }
+            m_work_guard.reset();
         }
-
-        m_work_guard.reset();
-        if (m_thread.joinable() && m_thread.get_id() != std::this_thread::get_id())
+        if (close_inline) close_on_context();
+        if (!on_context && m_thread.joinable())
         {
             m_thread.join();
         }
@@ -158,12 +173,16 @@ public:
             return;
         }
 
+        // Cancel control work before closing; callbacks see the disconnected
+        // state, and no BREAK or sampled baseline leaks into a new connection.
+        auto break_callback = stop_controls();
         // shutdown port first
         asio::error_code close_ec;
         m_port.close(close_ec);
         m_read_started = false;
         m_state.store(SerialState::Disconnected, std::memory_order_release);
 
+        if (break_callback) break_callback(ec);
         // notifying user
         if (m_disconnect_callback)
         {
@@ -191,19 +210,22 @@ public:
             }
 
             // try re-opening port
-            (void)detail::try_configure_port(m_port, m_port_name, m_baud_rate,
-                                             m_parity, m_stop_bits, m_data_bits,
-                                             m_flow_control)
-                 .or_else([this](auto&&) { schedule_reconnect(); }) // failed, try later
-                 .and_then([this]() -> tl::expected<void, std::error_code>
-                  {
-                      m_state.store(SerialState::Connected, std::memory_order_release);
-                      start_read_loop();
-                      start_write_loop();
-                      // notifying user
-                      if (m_reconnect_callback) m_reconnect_callback();
-                      return {};
-                  });
+            auto result = detail::try_configure_port(m_port, m_port_name, m_baud_rate,
+                                                     m_parity, m_stop_bits, m_data_bits,
+                                                     m_flow_control);
+            if (result) result = restore_modem_outputs();
+            if (!result)
+            {
+                asio::error_code ignored;
+                m_port.close(ignored);
+                schedule_reconnect();
+                return;
+            }
+            m_state.store(SerialState::Connected, std::memory_order_release);
+            start_read_loop();
+            start_write_loop();
+            restart_pinout_monitor();
+            if (!m_is_closed_by_user && m_reconnect_callback) m_reconnect_callback();
         });
     }
 
@@ -358,27 +380,180 @@ public:
         );
     }
 
-    // Runs a configuration change on the I/O thread. Called from that thread
-    // (for example inside a callback) it executes inline to avoid a deadlock.
-    tl::expected<void, std::error_code> run_on_context(
-        std::function<tl::expected<void, std::error_code>()> task)
+    // Admit commands before the work guard can be released. All accepted
+    // commands complete even when another thread starts close concurrently.
+    template <typename Task>
+    auto run_on_context(Task task) -> std::invoke_result_t<Task>
     {
-        if (m_is_closed_by_user.load(std::memory_order_acquire) || !m_thread.joinable())
+        using Result = std::invoke_result_t<Task>;
+        if (m_ctx.get_executor().running_in_this_thread())
         {
-            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
-        }
-        if (std::this_thread::get_id() == m_thread.get_id())
-        {
+            if (m_is_closed_by_user)
+                return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
             return task();
         }
-
-        auto state = std::make_shared<SyncWriteState>();
-        auto future = state->promise.get_future();
-        asio::post(m_ctx, [task = std::move(task), state]() mutable
+        auto completion = std::make_shared<std::promise<Result>>();
+        auto future = completion->get_future();
         {
-            state->promise.set_value(task());
-        });
+            std::lock_guard lock(m_control_mutex);
+            if (m_is_closed_by_user || !m_thread.joinable())
+                return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+            asio::post(m_ctx, [task = std::move(task), completion]() mutable
+            {
+                completion->set_value(task());
+            });
+        }
         return future.get();
+    }
+
+    tl::expected<void, std::error_code> restore_modem_outputs()
+    {
+        if (m_dtr)
+        {
+            auto result = detail::set_modem_output(m_port, true, *m_dtr);
+            if (!result) return result;
+        }
+        if (m_rts && m_flow_control != FlowControl::Hardware)
+            return detail::set_modem_output(m_port, false, *m_rts);
+        return {};
+    }
+
+    tl::expected<void, std::error_code> apply_modem_output(bool dtr, bool asserted)
+    {
+        if (!m_port.is_open())
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        if (!dtr && m_flow_control == FlowControl::Hardware)
+            return tl::make_unexpected(make_error_code(SerialError::UnsupportedOperation));
+        auto result = detail::set_modem_output(m_port, dtr, asserted);
+        if (result) (dtr ? m_dtr : m_rts) = asserted;
+        return result;
+    }
+
+    tl::expected<PinoutSignals, std::error_code> read_pinout()
+    {
+        if (!m_port.is_open())
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        return detail::read_pinout(m_port);
+    }
+
+    tl::expected<void, std::error_code> apply_break(bool enabled)
+    {
+        if (!m_port.is_open())
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        if (m_break_pulse_active)
+            return tl::make_unexpected(std::make_error_code(std::errc::operation_in_progress));
+        auto result = detail::set_break(m_port, enabled);
+        if (result) m_break_enabled = enabled;
+        return result;
+    }
+
+    void start_break_pulse(std::chrono::milliseconds duration, ControlCallback callback)
+    {
+        auto reject = [&](const std::error_code& error) { if (callback) callback(error); };
+        if (m_is_closed_by_user || !m_port.is_open())
+        {
+            reject(make_error_code(SerialError::DeviceDisconnected));
+            return;
+        }
+        if (duration.count() <= 0)
+        {
+            reject(make_error_code(SerialError::InvalidArgument));
+            return;
+        }
+        if (m_break_enabled || m_break_pulse_active)
+        {
+            reject(std::make_error_code(std::errc::operation_in_progress));
+            return;
+        }
+        auto result = detail::set_break(m_port, true);
+        if (!result) { reject(result.error()); return; }
+        m_break_enabled = true;
+        m_break_pulse_active = true;
+        m_break_callback = std::move(callback);
+        const auto generation = ++m_break_generation;
+        m_break_timer.expires_after(duration);
+        m_break_timer.async_wait([this, generation](const asio::error_code& error)
+        {
+            if (error || generation != m_break_generation) return;
+            auto result = detail::set_break(m_port, false);
+            if (result) m_break_enabled = false;
+            m_break_pulse_active = false;
+            auto callback = std::exchange(m_break_callback, {});
+            if (callback) callback(result ? std::error_code{} : result.error());
+        });
+    }
+
+    ControlCallback stop_controls()
+    {
+        ++m_pinout_generation;
+        m_pinout_timer.cancel();
+        m_pinout_baseline.reset();
+        ++m_break_generation;
+        m_break_timer.cancel();
+        if (m_break_enabled && m_port.is_open()) (void)detail::set_break(m_port, false);
+        m_break_enabled = false;
+        m_break_pulse_active = false;
+        return std::exchange(m_break_callback, {});
+    }
+
+    void schedule_pinout_poll()
+    {
+        if (!m_pinout_callback || !m_port.is_open() || m_is_closed_by_user) return;
+        const auto generation = m_pinout_generation;
+        m_pinout_timer.expires_after(m_pinout_interval);
+        m_pinout_timer.async_wait([this, generation](const asio::error_code& error)
+        {
+            if (error || generation != m_pinout_generation || m_is_closed_by_user) return;
+            auto result = read_pinout();
+            auto callback = m_pinout_callback; // callback may unregister itself
+            if (!result)
+            {
+                m_pinout_baseline.reset();
+                if (callback) callback(result.error(), PinoutSignals::None);
+                return;
+            }
+            const bool changed = m_pinout_baseline && *m_pinout_baseline != *result;
+            m_pinout_baseline = *result;
+            if (changed && callback) callback({}, *result);
+            if (generation == m_pinout_generation) schedule_pinout_poll();
+        });
+    }
+
+    void restart_pinout_monitor()
+    {
+        if (!m_pinout_callback) return;
+        auto result = read_pinout();
+        if (!result)
+        {
+            auto callback = m_pinout_callback;
+            callback(result.error(), PinoutSignals::None);
+            return;
+        }
+        m_pinout_baseline = *result;
+        schedule_pinout_poll();
+    }
+
+    tl::expected<void, std::error_code> configure_pinout_monitor(
+        PinoutCallback callback, std::chrono::milliseconds interval)
+    {
+        if (!m_port.is_open())
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        std::optional<PinoutSignals> baseline;
+        if (callback)
+        {
+            if (interval.count() <= 0)
+                return tl::make_unexpected(make_error_code(SerialError::InvalidArgument));
+            auto result = read_pinout();
+            if (!result) return tl::make_unexpected(result.error());
+            baseline = *result;
+        }
+        ++m_pinout_generation;
+        m_pinout_timer.cancel();
+        m_pinout_callback = std::move(callback);
+        m_pinout_baseline = baseline;
+        m_pinout_interval = interval;
+        schedule_pinout_poll();
+        return {};
     }
 
     tl::expected<void, std::error_code> apply_baud_rate(uint32_t rate)
@@ -416,14 +591,20 @@ public:
     tl::expected<void, std::error_code> apply_flow_control(FlowControl flow_control)
     {
         if (!m_port.is_open()) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
-        auto result = detail::set_flow_control(m_port, flow_control);
-        if (result) m_flow_control = flow_control;
+        auto result = detail::set_flow_control(m_port, flow_control, m_rts);
+        if (result)
+        {
+            m_flow_control = flow_control;
+            if (flow_control == FlowControl::Hardware) m_rts.reset();
+        }
         return result;
     }
 };
 
 tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view name) const
 {
+    if (m_rts && m_flow_control == FlowControl::Hardware)
+        return tl::make_unexpected(make_error_code(SerialError::UnsupportedOperation));
     Serial serial;
     auto& impl = *serial.m_impl;
 
@@ -438,6 +619,10 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     impl.m_stop_bits = m_stop_bits;
     impl.m_data_bits = m_data_bits;
     impl.m_flow_control = m_flow_control;
+    impl.m_dtr = m_dtr;
+    impl.m_rts = m_rts;
+    result = impl.restore_modem_outputs();
+    if (!result) return tl::make_unexpected(result.error());
     impl.m_auto_reconnect = m_auto_reconnect;
     impl.m_reconnect_interval = m_reconnect_interval;
 
@@ -445,6 +630,7 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
     impl.m_work_guard = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
         impl.m_ctx.get_executor()
     );
+    impl.m_state.store(SerialState::Connected, std::memory_order_release);
     impl.m_thread = std::jthread([&impl]
     {
 #ifdef _WIN32
@@ -453,7 +639,6 @@ tl::expected<Serial, std::error_code> SerialBuilder::open(const std::string_view
         impl.m_ctx.run();
     });
 
-    impl.m_state.store(SerialState::Connected, std::memory_order_release);
     return serial;
 }
 
@@ -656,4 +841,118 @@ void Serial::on_reconnect(std::function<void()> callback)
 
 Serial::Serial() : m_impl(std::make_unique<Impl>())
 {
+}
+
+tl::expected<void, std::error_code> Serial::set_data_terminal_ready(bool asserted)
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl, asserted] { return impl->apply_modem_output(true, asserted); });
+}
+
+tl::expected<void, std::error_code> Serial::set_request_to_send(bool asserted)
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl, asserted] { return impl->apply_modem_output(false, asserted); });
+}
+
+tl::expected<PinoutSignals, std::error_code> Serial::pinout_signals()
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl] { return impl->read_pinout(); });
+}
+
+tl::expected<bool, std::error_code> Serial::is_data_terminal_ready()
+{
+    return pinout_signals().map([](PinoutSignals signals)
+    {
+        return has_signal(signals, PinoutSignals::DataTerminalReady);
+    });
+}
+
+tl::expected<bool, std::error_code> Serial::is_request_to_send()
+{
+    return pinout_signals().map([](PinoutSignals signals)
+    {
+        return has_signal(signals, PinoutSignals::RequestToSend);
+    });
+}
+
+tl::expected<void, std::error_code> Serial::set_break_enabled(bool enabled)
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl, enabled] { return impl->apply_break(enabled); });
+}
+
+tl::expected<bool, std::error_code> Serial::is_break_enabled()
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl]() -> tl::expected<bool, std::error_code>
+    {
+        if (!impl->m_port.is_open())
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        return impl->m_break_enabled;
+    });
+}
+
+void Serial::async_send_break(std::chrono::milliseconds duration, ControlCallback callback)
+{
+    auto* impl = m_impl.get();
+    if (impl)
+    {
+        std::lock_guard lock(impl->m_control_mutex);
+        if (!impl->m_is_closed_by_user && impl->m_thread.joinable())
+        {
+            asio::post(impl->m_ctx, [impl, duration, callback = std::move(callback)]() mutable
+            {
+                impl->start_break_pulse(duration, std::move(callback));
+            });
+            return;
+        }
+    }
+    if (callback) callback(make_error_code(SerialError::DeviceDisconnected));
+}
+
+tl::expected<void, std::error_code> Serial::send_break(std::chrono::milliseconds duration)
+{
+    if (!m_impl || m_impl->m_is_closed_by_user)
+        return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    if (m_impl->m_ctx.get_executor().running_in_this_thread())
+        return tl::make_unexpected(std::make_error_code(std::errc::resource_deadlock_would_occur));
+    auto completion = std::make_shared<std::promise<std::error_code>>();
+    auto future = completion->get_future();
+    async_send_break(duration, [completion](const std::error_code& error)
+    {
+        completion->set_value(error);
+    });
+    const auto error = future.get();
+    if (error) return tl::make_unexpected(error);
+    return {};
+}
+
+tl::expected<void, std::error_code> Serial::on_pinout_changed(
+    PinoutCallback callback, std::chrono::milliseconds interval)
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl, callback = std::move(callback), interval]() mutable
+    {
+        return impl->configure_pinout_monitor(std::move(callback), interval);
+    });
+}
+
+tl::expected<SerialLineErrorCounters, std::error_code> Serial::line_error_counters()
+{
+    if (!m_impl) return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+    auto* impl = m_impl.get();
+    return impl->run_on_context([impl]() -> tl::expected<SerialLineErrorCounters, std::error_code>
+    {
+        if (!impl->m_port.is_open())
+            return tl::make_unexpected(make_error_code(SerialError::DeviceDisconnected));
+        return detail::read_line_errors(impl->m_port);
+    });
 }

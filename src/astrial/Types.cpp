@@ -18,6 +18,7 @@ std::string SerialErrorCategory::message(int ev) const
     case SerialError::ParseError: return "ParseError";
     case SerialError::ValueOutOfRange: return "ValueOutOfRange";
     case SerialError::WriteTimeout: return "WriteTimeout";
+    case SerialError::UnsupportedOperation: return "UnsupportedOperation";
     default: return "UnknownError";
     }
 }

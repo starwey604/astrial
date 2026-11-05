@@ -35,6 +35,90 @@ if (serial.is_open()) { /* state() == SerialState::Connected */ }
 
 运行时 setter 返回 `tl::expected<void, std::error_code>`，在 I/O 线程上执行，并会更新已保存的设置，使自动重连能够以新配置重新打开端口。`state()` 与 `is_open()` 用于查询端口当前处于已连接还是重连中。
 
+## RS-232 控制线与 BREAK
+
+需要控制调制解调器、复位线或完整 DB9 测试夹具时，可直接使用已打开的 `Serial`。
+这些接口沿用 QSerialPort 的逻辑含义：`true` 表示控制信号有效，不表示 MCU 侧 TTL
+引脚电压为高。下列方法均返回 `tl::expected<..., std::error_code>`。
+
+```cpp
+serial.set_data_terminal_ready(true).value();
+serial.set_request_to_send(false).value(); // 必须未启用硬件流控
+
+auto pins = serial.pinout_signals().value();
+bool cts = has_signal(pins, PinoutSignals::ClearToSend);
+bool dsr = has_signal(pins, PinoutSignals::DataSetReady);
+bool dcd = has_signal(pins, PinoutSignals::DataCarrierDetect);
+bool ri  = has_signal(pins, PinoutSignals::RingIndicator);
+```
+
+`is_data_terminal_ready()` 和 `is_request_to_send()` 同样查询驱动，返回
+`expected<bool, error_code>`。`pinout_signals()` 返回六路 DB9 控制信号，包括 DTR/RTS
+输出。查询失败会返回错误，而不是空位图。驱动不支持时返回
+`SerialError::UnsupportedOperation`，其他系统错误保留原错误码。
+
+Builder 可选的 `.data_terminal_ready(bool)` 与 `.request_to_send(bool)` 在打开后应用；
+打开瞬间仍可能短暂出现系统或转接器的默认状态。只有显式请求且设置成功的输出才会在
+重连回调之前恢复，旧调用方不需要支持控制线。硬件流控接管 RTS：手动设置 RTS，或
+同时配置 Builder 的 RTS 与 `FlowControl::Hardware`，都会返回 `UnsupportedOperation`。
+启用硬件流控会放弃保存的手动 RTS 设置；关闭流控后若需要特定状态，请重新设置 RTS。
+DTR 不受 RTS/CTS 流控影响。
+
+持续 BREAK 使用 `set_break_enabled(true)`，结束时调用 `set_break_enabled(false)`。
+`is_break_enabled()` 返回 Astrial 已成功应用的本地状态，不是物理波形读回。
+定时 BREAK 可异步发送，不阻塞 I/O 线程：
+
+```cpp
+serial.async_send_break(std::chrono::milliseconds(250),
+    [](const std::error_code& error) {
+        if (error) std::cerr << "BREAK: " << error.message() << '\n';
+    });
+```
+
+`send_break(duration)` 提供阻塞调用线程的版本，默认 250 ms。在 I/O 回调中应使用
+异步版本；同步版本在该线程返回 `resource_deadlock_would_occur`。时长必须为正数。
+BREAK 不会等待已有 TX 排空，实际时序受主机与 USB 调度影响。脉冲期间再次操作 BREAK，
+或持续 BREAK 尚未结束时请求脉冲，返回 `operation_in_progress`。关闭或断线会取消脉冲，
+完成其回调一次并清除本地 BREAK 状态；重连不会重新发送 BREAK。已入队请求的回调在
+I/O 线程执行；入队前因关闭或对象已移走而拒绝的请求，在调用线程执行回调。对象须存活
+到回调结束，并从 I/O 线程以外销毁。
+
+如需观察控制线变化，可显式启用轮询；默认不开启：
+
+```cpp
+serial.on_pinout_changed(
+    [](const std::error_code& error, PinoutSignals pins) {
+        if (error) {
+            std::cerr << "Pinout: " << error.message() << '\n';
+            return;
+        }
+        std::cout << "CTS asserted: " << has_signal(pins, PinoutSignals::ClearToSend) << '\n';
+    }, std::chrono::milliseconds(20)).value();
+// 停止监听：serial.on_pinout_changed({}).value();
+```
+
+注册时查询基线但不发送初始通知，后续变化在 I/O 线程回调。短脉冲可能漏采，不能用作
+边沿捕获。查询错误只通知一次并停止轮询，可重新注册以重试。检测到断线后取消轮询，
+重连时建立新基线并恢复订阅。与原有串口 I/O 一样，自动断线恢复需要活动的读写操作来
+检测设备丢失。回调内可查询或设置控制线、取消监听以及调用 `close()`。
+
+### 平台覆盖与 QSerialPort 对照
+
+| QSerialPort 控制项 | Astrial | 平台 |
+| --- | --- | --- |
+| `setDataTerminalReady` / `isDataTerminalReady` | `set_data_terminal_ready` / `is_data_terminal_ready` | Linux、macOS、Windows，取决于驱动 |
+| `setRequestToSend` / `isRequestToSend` | `set_request_to_send` / `is_request_to_send` | Linux、macOS、Windows；硬件流控时不能手动设置 |
+| `pinoutSignals` | `pinout_signals` + `PinoutSignals` / `has_signal` | 六路 DB9 控制信号，取决于驱动 |
+| `setBreakEnabled` / `isBreakEnabled` | `set_break_enabled` / `is_break_enabled` | Linux、macOS、Windows，取决于驱动 |
+| `sendBreak` | `send_break` / `async_send_break` | 主机计时脉冲，取决于驱动 |
+| Mark / Space 校验 | `Parity::Mark` / `Parity::Space` | Windows、带 `CMSPAR` 的 Linux；macOS 不支持 |
+
+额外提供的 `line_error_counters()` 通过 Linux `TIOCGICOUNT` 查询校验错、帧错、溢出、
+BREAK 和缓冲区溢出的累计快照。驱动未实现此操作时，以及在 Windows、macOS 上，返回
+`UnsupportedOperation`。计数器可能回绕或在重新打开时重置，USB 驱动也可能按错误报告
+而非损坏字节计数。它不是逐字节的接收错误或 BREAK 通知；现有 ASIO 字节流回调不暴露
+这些标记。RS-485 方向配置是另一项能力，本次 RS-232 控制接口不包含该配置。
+
 ## 借用式异步 I/O
 
 常规的 `on_data()` 与 `async_write()` API 通过 Astrial 自有的存储让缓冲区所有权保持简单。若集成方已经拥有稳定的缓冲区，可使用借用式 API 避免这些用户态拷贝：
@@ -144,7 +228,24 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-仅依赖硬件的串口检查位于 `tests/serial_hil.cpp`，由 `-DASTRIAL_BUILD_HIL_TESTS=ON` 启用。它们会注册到 CTest，但在夹具（fixture）缺失时以 77 退出（跳过），因此默认的测试运行永远不需要硬件。伪终端能够复现的部分都由上面的常规测试覆盖；伪终端无法反映的检查（校验使能、数据位、调制解调器线、break、RS-485、行错误计数）留给硬件验证。
+PTY 测试覆盖传输行为和控制能力不支持时的明确错误。Linux 静态构建还会运行链接边界的驱动响应
+测试，覆盖控制映射、错误、定时器、回调与重连恢复；这些软件测试不验证电气行为。
+
+可选的 `tests/serial_hil.cpp` 验证物理 RS-232 回环：断开其他设备，将 DB9 **2-3**、
+**7-8**、**4-1-6-9** 分别连接。它检查二进制收发，以及 DTR/RTS 的全部输出组合与
+CTS/DSR/DCD/RI 的实际对应状态。
+
+```bash
+cmake -S . -B build -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_BUILD_HIL_TESTS=ON
+cmake --build build
+ASTRIAL_HIL_PORT=/dev/ttyUSB0 ASTRIAL_HIL_FIXTURE=rs232-loopback \
+  ctest --test-dir build -R '^astrial_serial_hil$' --output-on-failure
+```
+
+缺少任一环境变量时会跳过（退出码 77）。MCU 或其他 RS-232 对端连接着时，不要运行
+回环模式。独立帧格式检查、实际硬件流控暂停、BREAK 波形与检测、错误注入及物理重连
+仍需独立对端或仪器；工具会明确列为未测试，不将回环通过当作完整硬件验证。RS-485
+另行处理。
 
 物理 USB 生命周期检查刻意与 CTest 分离，这样即使开发者机器上没有目标设备，也不会导致常规 CI 失败。请显式构建 HIL 工具，然后将其指向一个 Vendor Bulk 接口：
 

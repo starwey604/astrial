@@ -1,5 +1,6 @@
 #include <fstream>
 #include <astrial/detail.hpp>
+#include "serial_control.hpp"
 
 #include <asio.hpp>
 
@@ -80,21 +81,7 @@ namespace detail
 
     tl::expected<void, std::error_code> set_parity(asio::serial_port& port, Parity parity)
     {
-        asio::serial_port_base::parity::type asio_parity;
-        switch (parity)
-        {
-        case Parity::Even: asio_parity = asio::serial_port_base::parity::even;
-            break;
-        case Parity::Odd: asio_parity = asio::serial_port_base::parity::odd;
-            break;
-        default: asio_parity = asio::serial_port_base::parity::none;
-            break;
-        }
-
-        asio::error_code ec;
-        port.set_option(asio::serial_port_base::parity(asio_parity), ec);
-        if (ec) return tl::make_unexpected(ec);
-        return {};
+        return set_native_parity(port, parity);
     }
 
     tl::expected<void, std::error_code> set_stop_bits(asio::serial_port& port, StopBits stop_bits)
@@ -124,8 +111,23 @@ namespace detail
         return {};
     }
 
-    tl::expected<void, std::error_code> set_flow_control(asio::serial_port& port, FlowControl flow_control)
+    tl::expected<void, std::error_code> set_flow_control(asio::serial_port& port, FlowControl flow_control,
+                                                         std::optional<bool> manual_rts)
     {
+#ifdef _WIN32
+        DCB state{};
+        state.DCBlength = sizeof(state);
+        if (!::GetCommState(port.native_handle(), &state))
+            return tl::make_unexpected(std::error_code(static_cast<int>(::GetLastError()), std::system_category()));
+        state.fOutxCtsFlow = flow_control == FlowControl::Hardware;
+        state.fInX = state.fOutX = flow_control == FlowControl::Software;
+        if (flow_control == FlowControl::Hardware) state.fRtsControl = RTS_CONTROL_HANDSHAKE;
+        else state.fRtsControl = manual_rts.value_or(true) ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
+        if (!::SetCommState(port.native_handle(), &state))
+            return tl::make_unexpected(std::error_code(static_cast<int>(::GetLastError()), std::system_category()));
+        return {};
+#else
+        (void)manual_rts; // TCSANOW does not explicitly write the modem outputs.
         asio::serial_port_base::flow_control::type asio_flow;
         switch (flow_control)
         {
@@ -141,6 +143,7 @@ namespace detail
         port.set_option(asio::serial_port_base::flow_control(asio_flow), ec);
         if (ec) return tl::make_unexpected(ec);
         return {};
+#endif
     }
 
     tl::expected<void, std::error_code> try_configure_port(asio::serial_port& port, std::string_view name,
@@ -148,11 +151,17 @@ namespace detail
                                                            StopBits stop_bits, DataBits data_bits,
                                                            FlowControl flow_control)
     {
-        return try_open(port, name)
+        auto result = try_open(port, name)
               .and_then([&] { return set_baud_rate(port, rate); })
               .and_then([&] { return set_parity(port, parity); })
               .and_then([&] { return set_stop_bits(port, stop_bits); })
               .and_then([&] { return set_data_bits(port, data_bits); })
               .and_then([&] { return set_flow_control(port, flow_control); });
+        if (!result && port.is_open())
+        {
+            asio::error_code ignored;
+            port.close(ignored);
+        }
+        return result;
     }
 }

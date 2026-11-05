@@ -55,10 +55,14 @@ cmake --build build
   forces 8N1, so parity enable and character size are *not* observable and are
   left to hardware. Modem lines, break, RS-485, and line-error counters are also
   hardware-only.
-- `tests/serial_hil.cpp` collects the hardware-only serial checks. It is built
-  only with `ASTRIAL_BUILD_HIL_TESTS=ON`; it is still a scaffold, reports the
-  planned checks, and skips (exit 77) until the fixture exists. Never require
-  hardware for the default CTest run.
+- `tests/serial_controls.cpp` uses Linux static-build linker-boundary ioctl responses plus
+  a PTY to test software control/lifecycle contracts, not electrical behavior.
+- `tests/serial_hil.cpp` is built only with `ASTRIAL_BUILD_HIL_TESTS=ON`.
+  It requires both `ASTRIAL_HIL_PORT` and `ASTRIAL_HIL_FIXTURE=rs232-loopback`;
+  otherwise it skips (77). Disconnect other devices, then wire DB9 2-3, 7-8,
+  and 4-1-6-9. It validates data and control-line loopback, not BREAK waveforms,
+  independent framing, hardware-flow throttling, error injection or RS-485.
+  Never require hardware for the default CTest run.
 - USB lifecycle HIL (`tests/usb_lifecycle_hil.cpp`) is only built with
   `ASTRIAL_BUILD_USB_HIL=ON` and is never registered with CTest — run it
   manually against a real Vendor Bulk device so ordinary CI never needs hardware.
@@ -106,6 +110,27 @@ serial.write(cmd); // synchronous write
   (the change runs on the I/O thread) and update the stored settings so an
   automatic reconnect reopens with them. `state()` returns `SerialState` and
   `is_open()` is true only while `Connected` (false during `Reconnecting`).
+
+### RS-232 controls
+
+- `set_data_terminal_ready` / `set_request_to_send`, their `is_*` queries and
+  `pinout_signals()` run on the I/O thread and return `tl::expected`.
+  `PinoutSignals` contains the six DB9 control flags; use `has_signal()`.
+- Builder DTR/RTS settings are opt-in and apply after open. Successful explicit
+  settings are restored before reconnect callbacks. Hardware flow control owns
+  RTS and rejects manual RTS; enabling it discards saved manual RTS intent.
+- `set_break_enabled` controls persistent BREAK; `send_break` and
+  `async_send_break` provide host-timed pulses. BREAK is cancelled on close or
+  disconnect, never restored. Blocking `send_break` is rejected on the I/O
+  thread; use async there. Destroy `Serial` outside its I/O thread.
+- `on_pinout_changed` opts into sampled polling (default 20 ms), not edge
+  capture. Registration establishes a baseline; errors stop polling until
+  re-registration/reconnect. Empty callback disables it. Monitoring alone does
+  not replace read/write-based disconnect detection.
+- `Parity::Mark` / `Space` use Windows native parity or Linux `CMSPAR`; macOS
+  returns `UnsupportedOperation`. `line_error_counters()` uses Linux
+  `TIOCGICOUNT` only, returns unsupported elsewhere or on incapable drivers,
+  and does not expose per-byte receive error/BREAK notifications.
 
 ### USB bulk API (`astrial::usb`, `ASTRIAL_HAS_USB`)
 

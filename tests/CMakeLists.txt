@@ -70,3 +70,15 @@ if (ASTRIAL_BUILD_HIL_TESTS)
         TIMEOUT 60
         SKIP_RETURN_CODE 77)
 endif ()
+
+# Linker-boundary driver responses verify control/lifecycle contracts without
+# pretending that a pseudo-terminal can reproduce RS-232 electrical behavior.
+# --wrap cannot intercept a shared library's already-linked native calls.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+    add_executable(astrial_serial_control_tests serial_controls.cpp)
+    target_link_libraries(astrial_serial_control_tests PRIVATE astrial util)
+    target_link_options(astrial_serial_control_tests PRIVATE
+        "LINKER:--wrap=ioctl" "LINKER:--wrap=tcgetattr" "LINKER:--wrap=tcsetattr")
+    add_test(NAME astrial_serial_controls COMMAND astrial_serial_control_tests)
+    set_tests_properties(astrial_serial_controls PROPERTIES TIMEOUT 15)
+endif ()

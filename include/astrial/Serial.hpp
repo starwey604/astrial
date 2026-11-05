@@ -35,6 +35,46 @@ public:
     tl::expected<void, std::error_code> set_data_bits(DataBits data_bits);
     tl::expected<void, std::error_code> set_flow_control(FlowControl flow_control);
 
+    // RS-232 controls. All execute on the I/O thread and require an open port.
+    // true means asserted (positive RS-232 control voltage), not TTL-high.
+    // Successful explicit DTR/RTS settings are restored on reconnect. Enabling
+    // hardware flow control relinquishes the saved manual RTS setting.
+    tl::expected<void, std::error_code> set_data_terminal_ready(bool asserted);
+    tl::expected<void, std::error_code> set_request_to_send(bool asserted);
+    tl::expected<bool, std::error_code> is_data_terminal_ready();
+    tl::expected<bool, std::error_code> is_request_to_send();
+    tl::expected<PinoutSignals, std::error_code> pinout_signals();
+
+    // Persistent BREAK, cleared on close/disconnect and never restored.
+    // is_break_enabled() reports Astrial's successfully applied local state.
+    tl::expected<void, std::error_code> set_break_enabled(bool enabled);
+    tl::expected<bool, std::error_code> is_break_enabled();
+
+    using ControlCallback = std::function<void(const std::error_code&)>;
+    // Sends a timed BREAK without blocking the I/O thread. Does not drain TX.
+    // While active, another BREAK request fails with operation_in_progress.
+    // Duration is a host timer minimum, not a hardware timing guarantee.
+    // Accepted callbacks run exactly once on the I/O thread, including cancel.
+    // An immediately rejected request invokes its callback on the caller.
+    void async_send_break(std::chrono::milliseconds duration, ControlCallback callback);
+    // Blocks the caller, not the I/O thread. From an I/O callback this returns
+    // resource_deadlock_would_occur; use async_send_break() there instead.
+    tl::expected<void, std::error_code> send_break(
+        std::chrono::milliseconds duration = std::chrono::milliseconds(250));
+
+    using PinoutCallback = std::function<void(const std::error_code&, PinoutSignals)>;
+    // Opt-in sampled changes, not edge capture: pulses shorter than interval
+    // may be missed. Registration reads a baseline (no initial callback).
+    // Callbacks execute on the I/O thread. An empty callback disables polling.
+    // A query error is delivered once and stops polling until reconnect or
+    // re-registration. Monitoring resumes with a new baseline on reconnect.
+    tl::expected<void, std::error_code> on_pinout_changed(
+        PinoutCallback callback,
+        std::chrono::milliseconds interval = std::chrono::milliseconds(20));
+
+    // No synthesized counters: returns UnsupportedOperation if unavailable.
+    tl::expected<SerialLineErrorCounters, std::error_code> line_error_counters();
+
     ~Serial();
 
     Serial(const Serial&) = delete;

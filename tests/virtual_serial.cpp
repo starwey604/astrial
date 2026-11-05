@@ -391,6 +391,41 @@ void test_flow_control_flags_linux()
 }
 #endif
 
+// A PTY verifies that missing hardware controls fail explicitly without
+// disrupting ordinary data I/O; it does not validate pin voltages or BREAK.
+void test_rs232_unsupported_and_closed()
+{
+    PseudoTerminal terminal;
+    auto serial = open_serial(terminal);
+#if defined(__linux__)
+    auto pins = serial.pinout_signals();
+    require(!pins && pins.error() == SerialError::UnsupportedOperation,
+            "PTY modem query should report UnsupportedOperation");
+    auto dtr = serial.set_data_terminal_ready(true);
+    require(!dtr && dtr.error() == SerialError::UnsupportedOperation,
+            "PTY DTR should report UnsupportedOperation");
+    auto counters = serial.line_error_counters();
+    require(!counters && counters.error() == SerialError::UnsupportedOperation,
+            "PTY must not synthesize error counters");
+    auto monitor = serial.on_pinout_changed([](const auto&, auto) {});
+    require(!monitor && monitor.error() == SerialError::UnsupportedOperation,
+            "PTY pin monitoring must reject unsupported ioctls");
+#endif
+    require(serial.set_flow_control(FlowControl::Hardware).has_value(), "hardware mode failed");
+    auto rts = serial.set_request_to_send(true);
+    require(!rts && rts.error() == SerialError::UnsupportedOperation,
+            "hardware mode must reject manual RTS");
+    require(serial.set_flow_control(FlowControl::None).has_value(), "flow None failed");
+    const std::array<uint8_t, 3> bytes{1, 2, 3};
+    require(serial.write(bytes).has_value(), "unsupported control broke TX");
+    require(terminal.read_exact(bytes.size()) == std::vector<uint8_t>(bytes.begin(), bytes.end()),
+            "unsupported control corrupted TX");
+    serial.close();
+    require(!serial.set_data_terminal_ready(false) && !serial.set_request_to_send(false) &&
+            !serial.pinout_signals() && !serial.set_break_enabled(false) && !serial.is_break_enabled() &&
+            !serial.send_break() && !serial.line_error_counters(), "closed controls should fail");
+}
+
 void test_runtime_set_on_closed_port()
 {
     PseudoTerminal terminal;
@@ -418,6 +453,7 @@ int main()
         test_flow_control_flags_linux();
 #endif
         test_runtime_set_on_closed_port();
+        test_rs232_unsupported_and_closed();
         std::cout << "Astrial virtual serial tests passed\n";
         return 0;
     }

@@ -43,6 +43,105 @@ thread, and update the stored settings so an automatic reconnect reopens with
 them. `state()` and `is_open()` report whether the port is connected or
 reconnecting.
 
+## RS-232 control lines and BREAK
+
+For a modem, reset line, or a full DB9 test fixture, use the open `Serial`
+object directly. These controls follow QSerialPort's logical signal meanings:
+`true` asserts a control line; it does not mean a high voltage on an MCU-side
+TTL pin. All methods below return `tl::expected<..., std::error_code>`.
+
+```cpp
+serial.set_data_terminal_ready(true).value();
+serial.set_request_to_send(false).value(); // requires non-hardware flow control
+
+auto pins = serial.pinout_signals().value();
+bool cts = has_signal(pins, PinoutSignals::ClearToSend);
+bool dsr = has_signal(pins, PinoutSignals::DataSetReady);
+bool dcd = has_signal(pins, PinoutSignals::DataCarrierDetect);
+bool ri  = has_signal(pins, PinoutSignals::RingIndicator);
+```
+
+`is_data_terminal_ready()` and `is_request_to_send()` also query the driver,
+returning `expected<bool, error_code>`. `pinout_signals()` returns all six DB9
+control signals, including the DTR/RTS outputs. A failed query returns an error,
+not an empty signal mask. Unsupported driver operations return
+`SerialError::UnsupportedOperation`; other native errors are preserved.
+
+Optional builder settings `.data_terminal_ready(bool)` and
+`.request_to_send(bool)` apply after opening; an OS/adapter may briefly apply
+its defaults during open. Only explicitly requested, successfully set outputs
+are restored before the reconnect callback. Existing callers do not need modem
+control support. Hardware flow control owns RTS: a manual RTS setter, or an
+explicit builder RTS setting combined with `FlowControl::Hardware`, fails with
+`UnsupportedOperation`. Enabling hardware flow control discards saved manual
+RTS intent; set RTS again after disabling it if a particular state is needed.
+DTR remains independent of RTS/CTS flow control.
+
+For a persistent BREAK use `set_break_enabled(true)` and later
+`set_break_enabled(false)`. `is_break_enabled()` reports Astrial's successfully
+applied local state; there is no portable physical BREAK readback. For a timed
+BREAK that leaves the I/O thread responsive:
+
+```cpp
+serial.async_send_break(std::chrono::milliseconds(250),
+    [](const std::error_code& error) {
+        if (error) std::cerr << "BREAK: " << error.message() << '\n';
+    });
+```
+
+`send_break(duration)` offers a blocking caller-side equivalent (default
+250 ms). Use the async form inside I/O callbacks; the blocking form returns
+`resource_deadlock_would_occur` there. Durations must be positive. BREAK does
+not drain queued TX, and timing is subject to host/USB scheduling. Another BREAK
+request during a pulse, or a pulse while persistent BREAK is active, returns
+`operation_in_progress`. Closing/disconnecting cancels a pulse, completes its
+callback once, and clears local BREAK state. BREAK is never replayed on
+reconnect. Accepted async callbacks run on the I/O thread; a request rejected
+before enqueueing (closed/moved-from object) invokes its callback on the caller.
+Keep the object alive until callbacks finish; destroy it outside its I/O thread.
+
+To observe sampled modem-state changes, opt into polling (off by default):
+
+```cpp
+serial.on_pinout_changed(
+    [](const std::error_code& error, PinoutSignals pins) {
+        if (error) {
+            std::cerr << "Pinout: " << error.message() << '\n';
+            return;
+        }
+        std::cout << "CTS asserted: " << has_signal(pins, PinoutSignals::ClearToSend) << '\n';
+    }, std::chrono::milliseconds(20)).value();
+// Later: serial.on_pinout_changed({}).value();
+```
+
+Registration queries a baseline without emitting it; subsequent changes are
+reported on the I/O thread. Short pulses can be missed, so this is not edge
+capture. An error is delivered once and stops polling; re-register to retry.
+A detected disconnect cancels polling; reconnect starts a fresh baseline and
+resumes the subscription. As with ordinary serial I/O, automatic disconnect
+recovery requires an active read/write operation to detect a lost device.
+Callbacks may query/set controls, unregister monitoring, or call `close()`.
+
+### Platform coverage and QSerialPort correspondence
+
+| QSerialPort control | Astrial | Platforms |
+| --- | --- | --- |
+| `setDataTerminalReady` / `isDataTerminalReady` | `set_data_terminal_ready` / `is_data_terminal_ready` | Linux, macOS, Windows; driver-dependent |
+| `setRequestToSend` / `isRequestToSend` | `set_request_to_send` / `is_request_to_send` | Linux, macOS, Windows; hardware-flow restriction |
+| `pinoutSignals` | `pinout_signals` + `PinoutSignals` / `has_signal` | Six DB9 control signals; driver-dependent |
+| `setBreakEnabled` / `isBreakEnabled` | `set_break_enabled` / `is_break_enabled` | Linux, macOS, Windows; driver-dependent |
+| `sendBreak` | `send_break` / `async_send_break` | Host-timed pulse; driver-dependent |
+| Mark / Space parity | `Parity::Mark` / `Parity::Space` | Windows and Linux with `CMSPAR`; unsupported on macOS |
+
+`line_error_counters()` is an additional Linux `TIOCGICOUNT` snapshot of parity,
+framing, overrun, BREAK, and buffer-overrun counters. An unsupported driver
+(including adapters that do not implement this ioctl), Windows, or macOS returns
+`UnsupportedOperation`. Counters may wrap or reset on reopen and USB drivers may
+count error reports rather than individual corrupt bytes. They do not provide
+per-byte RX error/BREAK callbacks. The existing ASIO byte-stream callbacks do
+not expose those flags. RS-485 direction configuration is a separate capability
+and is not implemented by these RS-232 controls.
+
 ## Borrowed asynchronous I/O
 
 The regular `on_data()` and `async_write()` APIs keep buffer ownership simple
@@ -201,12 +300,27 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Hardware-only serial checks live in `tests/serial_hil.cpp`, gated behind
-`-DASTRIAL_BUILD_HIL_TESTS=ON`. They are registered with CTest but exit with 77
-(skipped) until a fixture is present, so the default test run never needs
-hardware. Anything a pseudo-terminal can reproduce is covered by the ordinary
-tests above; the checks a PTY cannot reflect (parity enable, character size,
-modem lines, break, RS-485, line-error counters) are left to hardware.
+The PTY tests cover transport behavior and explicit unsupported-control errors.
+Linux static builds additionally run linker-boundary native-driver response tests for control
+mapping, errors, timers, callbacks, and reconnect restoration. Those tests do not
+validate electrical behavior.
+
+The opt-in `tests/serial_hil.cpp` suite validates a physical RS-232 loopback:
+disconnect other equipment and wire DB9 **2-3**, **7-8**, and **4-1-6-9**. It checks
+binary data and all DTR/RTS output combinations against CTS/DSR/DCD/RI.
+
+```bash
+cmake -S . -B build -DASTRIAL_BUILD_TESTS=ON -DASTRIAL_BUILD_HIL_TESTS=ON
+cmake --build build
+ASTRIAL_HIL_PORT=/dev/ttyUSB0 ASTRIAL_HIL_FIXTURE=rs232-loopback \
+  ctest --test-dir build -R '^astrial_serial_hil$' --output-on-failure
+```
+
+Without both environment variables it skips (exit 77). Do not use loopback mode
+while an MCU or other RS-232 peer is attached. Independent frame-format checks,
+actual hardware-flow throttling, BREAK waveform/detection, error injection,
+and physical reconnect still require a peer/instrument fixture; the tool reports
+these as not tested rather than claiming a full HIL pass. RS-485 remains separate.
 
 Physical USB lifecycle checks are deliberately separate from CTest so a
 developer machine without the selected device never fails ordinary CI. Build
