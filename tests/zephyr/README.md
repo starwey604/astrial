@@ -1,11 +1,12 @@
 # Astrial Zephyr firmware tests
 
-板载固件，用于 Astrial USB HS bulk 的硬件在环（HIL）测试。宿主机侧的
+独立板载固件，用于 Astrial USB HS bulk 和 RS-232 的硬件在环（HIL）测试。USB 宿主机侧的
 HIL 程序见 `tests/usb_lifecycle_hil.cpp`（将来还有 `usb_perf_hil`）。
 
-**这些应用不参与 CTest，也不进 CI**——它们需要本机的 west workspace 和
+**这些固件应用不参与宿主库的 CTest，也不进 CI**——它们需要本机的 west workspace 和
 Zephyr SDK，由 `tests/CMakeLists.txt` 显式列举源文件的方式隔离，宿主机构建
-完全看不到这个目录。
+完全看不到这个目录。`rs232_fixture/tests` 另有独立的纯软件 CTest，
+不依赖 Zephyr 或硬件。
 
 ## 目录
 
@@ -13,6 +14,9 @@ Zephyr SDK，由 `tests/CMakeLists.txt` 显式列举源文件的方式隔离，�
 |---|---|---|
 | `usb_enum/` | M1+M2 | 枚举检查固件：VID/PID `2fe3:574c`、interface 0、bulk `0x01`/`0x81`，同时就是后续 HIL 测试的目标设备 |
 | `usb_perf/` | M3 | 独立 bulk echo 固件：VID/PID `2fe3:574d`、interface 0、bulk `0x01`/`0x81`，用于延迟和大包性能测试 |
+| [`rs232_fixture/`](rs232_fixture/README.md) | RS-232 v1 | FRDM-MCXN947：J17 控制协议、UART6 数据收发、六路握手 GPIO；仅完成交叉编译与软件测试，尚未烧录 |
+
+RS-232 的接线、构建和验收见其独立 README；以下 USB 章节保留原有实测记录。
 
 ## 前置条件
 
@@ -206,5 +210,5 @@ USB lifecycle HIL（2 轮）与常规 CTest 均通过。
   自己写（本 repo 的约定，见本目录 README 顶部）。
 - VID/PID、端点布局以 `include/astrial/Usb.hpp` 的默认值为准；改任何一边
   都要同步 `usb_lifecycle_hil` 的默认值。
-- 记录验证过的 Zephyr commit（当前 `933fe1291d2`），workspace 滚动更新后
+- 每个应用记录各自验证过的 Zephyr commit（上述 USB 实测为 `933fe1291d2`），workspace 滚动更新后
   重新跑一遍枚举检查。

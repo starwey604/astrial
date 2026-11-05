@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: MIT */
+/ {
+    zephyr,user {
+        /* PC/DTE signal names; MAX3237 inverts each modem signal. */
+        pc-cts-gpios = <&gpio3 23 GPIO_ACTIVE_LOW>;
+        pc-dsr-gpios = <&gpio0 29 GPIO_ACTIVE_LOW>;
+        pc-dcd-gpios = <&gpio1 23 GPIO_ACTIVE_LOW>;
+        pc-ri-gpios = <&gpio0 30 GPIO_ACTIVE_LOW>;
+        pc-rts-gpios = <&gpio3 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        pc-dtr-gpios = <&gpio0 31 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+    };
+};
+&pinctrl {
+    rs232_uart6_default: rs232_uart6_default {
+        group0 {
+            pinmux = <FC6_P0_PIO3_20>, <FC6_P1_PIO3_21>;
+            input-enable;
+            drive-strength = "low";
+            slew-rate = "fast";
+        };
+    };
+};
+&flexcomm4_lpuart4 { current-speed = <115200>; };
+&flexcomm6_lpspi6 { status = "disabled"; };
+&flexcomm6_lpi2c6 { status = "disabled"; };
+&flexcomm6_lpuart6 {
+    status = "okay";
+    current-speed = <115200>;
+    pinctrl-0 = <&rs232_uart6_default>;
+    pinctrl-names = "default";
+};
+&sai1 { status = "disabled"; };
